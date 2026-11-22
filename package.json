@@ -1,6 +1,6 @@
 {
   "name": "class101-for-webos",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Unofficial LG webOS TV app for CLASS101: remote-friendly lectures, every login method, 0.75–2x playback with pitch-kept sound",
   "license": "MIT",
@@ -31,7 +31,8 @@
     "launch": "node scripts/tv.mjs launch",
     "inspect": "node scripts/tv.mjs inspect",
     "extend": "node scripts/tv.mjs extend",
-    "tv:login": "node scripts/tv-login.mjs"
+    "tv:login": "node scripts/tv-login.mjs",
+    "screenshots": "npm run build -- --dev && node scripts/screenshots.mjs"
   },
   "devDependencies": {
     "@webos-tools/cli": "^3.2.6",

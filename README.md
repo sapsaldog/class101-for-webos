@@ -13,6 +13,18 @@ LG TV에서 [클래스101](https://class101.net) 강의를 리모컨으로 편�
 CLASS101's web backend directly, and plays lectures at 0.75–2x with pitch-kept sound, which LG's app media
 stack can't do by itself. Korean UI only.*
 
+## 화면
+
+<img src="docs/screenshots/home.png" alt="내 클래스: 이어보기와 수강 중인 클래스" width="100%">
+
+| 강의 목록 | 1.25배 재생 (자막, 진행 막대) |
+| --- | --- |
+| <img src="docs/screenshots/class.png" alt="챕터별 강의 목록"> | <img src="docs/screenshots/player.png" alt="1.25배 재생 화면"> |
+| **빠른 메뉴 (▲)** | **클래스 찾기** |
+| <img src="docs/screenshots/menu.png" alt="재생 속도와 자막을 바꾸는 빠른 메뉴"> | <img src="docs/screenshots/search-results.png" alt="인기 검색어, 카테고리, 결과"> |
+
+<sub>스크린샷 속 클래스·크리에이터·표지·계정은 모두 지어낸 예시입니다. `npm run screenshots`로 다시 만들 수 있어요.</sub>
+
 ## 할 수 있는 것
 
 - **로그인**: 이메일·비밀번호는 TV에서 바로. 카카오·네이버·구글·애플·페이스북 계정은 컴퓨터에서 한 번 로그인해 TV로 넘깁니다(아래 참고).
@@ -57,6 +69,8 @@ TV 홈 화면에 **클래스101** 앱이 생깁니다.
 | 이메일 | TV 로그인 화면에서 이메일·비밀번호 입력 |
 | 카카오·네이버·구글·애플·페이스북 | 컴퓨터에서 `npm run tv:login` |
 
+<img src="docs/screenshots/login.png" alt="TV 로그인 화면" width="60%">
+
 `npm run tv:login`은 새 크롬 창(임시 프로필)으로 클래스101 로그인 페이지를 엽니다. 거기서 평소처럼 로그인하면 창이 저절로 닫히고, TV 앱이 다시 실행되면서 로그인됩니다. 클래스101 사이트에서 직접 로그인하므로 클래스101이 지원하는 모든 방법이 됩니다.
 
 - 로그인 정보(갱신 토큰)는 화면에 찍거나 파일로 저장하지 않고 개발자 모드 연결로만 TV에 보냅니다. 임시 브라우저 프로필은 바로 지웁니다.
@@ -91,6 +105,21 @@ LG TV 앱 환경에서는 기본 플레이어를 1배속이 아닌 속도로 돌
 - **소리**: 강의의 별도 소리 트랙을 받아 WSOLA로 목소리 높이를 유지한 채 길이만 줄이고, Web Audio로 화면 시계에 맞춰 틉니다.
 - 무거운 계산은 웹 워커에서 돌려 리모컨 반응과 화면이 끊기지 않게 합니다.
 
+```mermaid
+flowchart LR
+  subgraph 화면
+    V1["HLS 영상 조각 (TS)"] -->|"워커: mux.js"| V2[fMP4]
+    V2 -->|"시간 값 ÷ 배속"| V3[MSE]
+    V3 --> V4["video는 1배속 재생<br/>내용은 1.25배로 지나감"]
+  end
+  subgraph 소리
+    A1["HLS 소리 조각 (AAC)"] -->|decodeAudioData| A2[PCM]
+    A2 -->|"워커: WSOLA"| A3["목소리 높이 그대로<br/>길이만 줄임"]
+    A3 --> A4[Web Audio]
+  end
+  V4 -. "화면 시계에 맞춤" .-> A4
+```
+
 자세한 설계와 TV에서 잰 숫자는 [AGENTS.md](AGENTS.md)에 있습니다.
 
 ## 개발자 모드 유지 (중요)
@@ -124,6 +153,7 @@ test/                가짜 클래스101 서버와 옛 크롬(68)으로 돌리�
 ```sh
 npm run build          # dist/ (릴리스, 압축)
 npm test               # 단위 테스트 + 개발 빌드 + e2e·배속·로그인 테스트
+npm run screenshots    # README 스크린샷 다시 만들기 (지어낸 예시 데이터, 구글 크롬·ffmpeg 필요)
 sh test/make-media.sh  # 테스트용 영상·소리 만들기 (ffmpeg)
 npm run inspect        # TV에서 실행 중인 앱에 Web Inspector 연결
 ```

@@ -4,6 +4,7 @@
   z-index: 2147483647; pointer-events: none;
   font-family: "Pretendard", "Pretendard Variable", "LG Smart UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
   color: #fff; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em;
+  word-break: keep-all; overflow-wrap: break-word;
 }
 .c101-layer * { box-sizing: border-box; }
 

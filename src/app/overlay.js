@@ -18,6 +18,11 @@ function h(tag, attrs, children) {
 function show(el, on) {
   if (on) el.setAttribute('data-show', '');
   else el.removeAttribute('data-show');
+  // Captions live in the player screen; this lets them move above the progress bar.
+  if (el === parts.osd) {
+    if (on) document.body.setAttribute('data-osd', '');
+    else document.body.removeAttribute('data-osd');
+  }
 }
 
 export function fmtTime(sec) {

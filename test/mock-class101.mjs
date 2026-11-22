@@ -8,8 +8,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dist = path.join(root, 'dist');
 const media = path.join(root, 'test/fixtures/media');
 
-// videoFor(lecture, base) lets a test choose each lecture's videoUrl.
-export async function startMock({ videoFor } = {}) {
+// videoFor(lecture, base) lets a test choose each lecture's videoUrl. data swaps in
+// another catalogue (test/showcase-data.mjs: { graphql, serve }) and serveOpts is
+// passed to its serve().
+export async function startMock({ videoFor, data, serveOpts } = {}) {
 
 const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [] };
 let base = '';
@@ -41,6 +43,8 @@ function graphql(body, auth) {
     return { errors: [{ message: 'You need to authenticate first.', extensions: { code: 'UNAUTHENTICATED' } }], data: null };
   }
   const v = body.variables || {};
+  const custom = data && data.graphql(body, base);
+  if (custom) return custom;
   switch (body.operationName) {
     case 'TvTakingClasses':
       return { data: { viewer: { takingClasses: { edges: classes().map((node) => ({ node })), pageInfo: { hasNextPage: false, endCursor: null } } } } };
@@ -153,6 +157,11 @@ const server = http.createServer(async (req, res) => {
     return json(400, { error: { message: 'INVALID_REFRESH_TOKEN' } });
   }
   if (url.pathname === '/graphql') return json(200, graphql(JSON.parse(await readJson(req)), req.headers.authorization));
+  if (data && data.serve) {
+    const handled = data.serve(url, res, serveOpts);
+    if (handled && handled.file) return serveFile(res, handled.file, handled.type, req);
+    if (handled) return;
+  }
   if (url.pathname === '/cover.png') return serveFile(res, path.join(dist, 'splash.png'), 'image/png');
   if (url.pathname === '/media/ko.srt') {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
