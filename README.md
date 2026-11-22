@@ -158,6 +158,8 @@ sh test/make-media.sh  # 테스트용 영상·소리 만들기 (ffmpeg)
 npm run inspect        # TV에서 실행 중인 앱에 Web Inspector 연결
 ```
 
+앱 아이콘과 시작 화면을 내 것으로 바꾸려면 `app/local/`에 `icon.png`(80×80), `largeIcon.png`(130×130), `splash.png`(1920×1080) 중 원하는 것을 넣고 다시 빌드하세요. 이 폴더는 저장소에 올라가지 않습니다.
+
 테스트에는 크롬 68(webOS 5와 같은 엔진)과 구글 크롬(H.264/AAC 재생용)이 필요합니다. 크롬 68은 구글 스냅숏 빌드를 받아 씁니다(macOS).
 
 ```sh

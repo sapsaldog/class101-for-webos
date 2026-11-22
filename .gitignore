@@ -8,3 +8,4 @@ test/fixtures/media/
 .DS_Store
 .env
 .env.*
+app/local/

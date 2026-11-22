@@ -21,8 +21,14 @@ fs.mkdirSync(dist, { recursive: true });
 const appinfo = JSON.parse(fs.readFileSync(path.join(root, 'app/appinfo.json'), 'utf8'));
 appinfo.version = pkg.version;
 fs.writeFileSync(path.join(dist, 'appinfo.json'), JSON.stringify(appinfo, null, 2) + '\n');
+// app/local/ (gitignored) can hold your own icon.png, largeIcon.png and splash.png;
+// --no-local ignores it (README screenshots use the repo's icons).
+const local = [];
 for (const file of ['index.html', 'icon.png', 'largeIcon.png', 'splash.png']) {
-  fs.copyFileSync(path.join(root, 'app', file), path.join(dist, file));
+  const own = path.join(root, 'app/local', file);
+  const useOwn = !process.argv.includes('--no-local') && fs.existsSync(own);
+  if (useOwn) local.push(file);
+  fs.copyFileSync(useOwn ? own : path.join(root, 'app', file), path.join(dist, file));
 }
 
 const workerCode = await buildWorkerCode({ minify: !dev });
@@ -46,4 +52,4 @@ await esbuild.build({
 });
 
 const size = (f) => (fs.statSync(path.join(dist, f)).size / 1024).toFixed(1);
-console.log(`built dist/ v${pkg.version}: app.js ${size('app.js')} KB (worker ${(workerCode.length / 1024).toFixed(1)} KB), app.css ${size('app.css')} KB`);
+console.log(`built dist/ v${pkg.version}: app.js ${size('app.js')} KB (worker ${(workerCode.length / 1024).toFixed(1)} KB), app.css ${size('app.css')} KB${local.length ? ` · from app/local: ${local.join(', ')}` : ''}`);
