@@ -1,6 +1,6 @@
 {
   "name": "class101-for-webos",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "description": "Unofficial LG webOS TV app for CLASS101: remote-friendly lectures, every login method, 0.75–2x playback with pitch-kept sound",
   "license": "MIT",

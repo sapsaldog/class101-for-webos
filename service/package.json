@@ -1,6 +1,6 @@
 {
   "name": "com.sapsaldog.class101.service",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Relays Class101 GraphQL calls with a Korean Accept-Language (the web engine forces the TV's locale)",
   "main": "index.js"
 }
