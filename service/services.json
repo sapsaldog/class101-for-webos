@@ -1,0 +1,15 @@
+{
+  "id": "com.sapsaldog.class101.service",
+  "description": "Class101 helper service",
+  "services": [
+    {
+      "name": "com.sapsaldog.class101.service",
+      "description": "GraphQL relay with Accept-Language: ko",
+      "commands": [
+        { "name": "gql", "description": "POST a GraphQL body to the Class101 gateway" },
+        { "name": "ping", "description": "Health check" },
+        { "name": "keepAlive", "description": "Subscribe to keep the service warm while the app is open" }
+      ]
+    }
+  ]
+}

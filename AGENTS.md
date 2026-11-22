@@ -1,0 +1,48 @@
+# Class101 for webOS (class101-for-webos)
+
+Unofficial LG webOS TV app for CLASS101 with its own TV screens (Preact). It talks to Class101's backend directly: Firebase Auth + the Class101 GraphQL gateway. User-facing docs (Korean) are in README.md; the UI is Korean.
+
+## Target
+
+- Reference TV: LG OLED55CX (2020), webOS 5.6.2, web engine Chromium 68. Developer Mode device name `tv` (override with `TV_DEVICE`).
+- Build target chrome53 (webOS 4+). esbuild lowers syntax; `src/app/polyfills.js` (core-js) fills built-ins. Check with `npm run check:compat` (also checks the media worker bundle).
+- Packaged web apps on webOS run without CORS/mixed-content enforcement (a file:// app can fetch class101.net, googleapis and LAN http). Desktop browsers do enforce it, so tests use a same-origin mock.
+
+## Backend (found in class101.net's production bundle, Nov 2026)
+
+- Auth: Firebase project `class101-api`, web API key `AIzaSyBOybGuB69OpLttriljMZUvEpdFXTqahFY` (Class101's public web key, no referrer restriction). Sign in `identitytoolkit.googleapis.com/v1/accounts:signInWithPassword`; refresh `securetoken.googleapis.com/v1/token`.
+- Sign-in providers: email/password, plus Google, Apple and Facebook as Firebase providers. Kakao and Naver are Class101's own flows on class101.net (not Firebase providers). Authorized domains include `localhost` and `127.0.0.1`.
+- GraphQL: `https://cdn-production-gateway.class101.net/graphql`, header `authorization: Bearer <Firebase ID token>`, `accept-language: ko`. Its WAF challenges requests without a User-Agent (browsers and curl pass). Strip the site's client-only directives (`@merge`, `@relayPagination`) or the gateway rejects the document.
+- Operations used (src/app/api.js): `viewer.takingClasses`, `lastClass`, `klassById { chaptersV2 { lectures } }`, `lectureV2ById { videoUrl canAccess }`, `lesson { video { progressSeconds } captions }`, `setLessonProgress`, `completeLectureV3`, `searchProductsV5`, `categoryProductsV4`, `trendingSearchTermsV2`, `popularCategories`. Class.id == klassId; lesson id == lecture id.
+- `videoUrl` = CloudFront-signed HLS on private-cdn.class101.net (H.264 TS in 540p/720p/1080p, separate packed-AAC audio rendition plus a "vocals" one, no DRM); captions are WebVTT (ko/en/ja auto). `setLessonProgress` shows up in `lastLesson.video.progressSeconds`.
+- Language: the gateway localizes titles by Accept-Language only, and webOS WAM overwrites that header with the TV menu language. So GraphQL goes through `service/` (JS service, Node v8.12 on the TV) with `accept-language: ko` and a User-Agent.
+
+## Login hand-over (scripts/tv-login.mjs)
+
+- Accounts without a password sign in on class101.net in a Chrome-family browser that the script starts with a temporary profile and `--remote-debugging-port`. It polls class101.net pages for the Firebase user in IndexedDB (`firebaseLocalStorageDb` / `firebase:authUser:*`), then deletes the profile and relaunches the TV app with `{ c101RefreshToken, email }` as launch params (`ares-launch -p`). App.jsx adopts them (`PalmSystem.launchParams` / `webOSRelaunch`).
+- The IndexedDB probe aborts its upgrade so it never creates Firebase's database first.
+- `--manual` prints a console snippet for the user's own browser; `--dry-run` skips the TV. test/login.mjs covers both against a local page (`C101TV_LOGIN_URL`, `C101TV_LOGIN_HEADLESS`).
+- Why not sign in on the TV itself: class101.net's own pages need Chromium 94+ (webOS 5 has 68; an earlier attempt to run the site on the TV failed for that reason), and Kakao/Naver redirect only to class101.net.
+
+## Speed playback (src/app/speedVideo.js, speedAudio.js, media.worker.js)
+
+- LG limits (LG forum "TV app spec", confirmed on the reference TV): the native player off 1x mutes audio and trick-plays the picture; MSE ignores `playbackRate`, even video-only. So speeds ≠ 1 on HLS use our own pipeline; 1x stays native.
+- Picture: fetch the video variant (≤720p; ≤540p above 1.5x), transmux TS→fMP4 with mux.js, divide tfdt/trun times by the rate (fmp4.js), append to MSE. The `<video>` plays 1x over a shorter timeline: media time = content time / rate. At 1080p the reference TV fell to 0.7x media speed (~23 fps decoded).
+- Sound: the HLS alt audio rendition (packed AAC, not "vocals") → decodeAudioData → WSOLA (wsola.js) → AudioBufferSourceNodes at sample-exact times, locked to the picture clock (`SpeedVideo.contentTime()`).
+- Both CPU jobs run in Web Workers from a blob: URL (`__MEDIA_WORKER__`, built by scripts/worker.mjs; blob workers work in file:// webOS apps). On the main thread, WSOLA took ~0.6 s per 5 s segment and blocked the page ~90% of the time.
+- Sync: on webOS `video.currentTime` updates in ~200 ms steps and goes stale while the page is busy. Drift therefore uses the largest extrapolation of recent clock steps (steady readings are skipped: a stalled clock must not be extrapolated) and `AudioContext.getOutputTimestamp()`. Resync (an audible gap) only after 3 checks past 150 ms. A naive check restarted the sound every ~1.7 s (v0.4.x).
+- Reference TV, v0.5.0, 720p, 1.25x: content 1.25–1.26 s/s, 0 resyncs, drift −13…−70 ms, no long tasks, 37.5 frames decoded/s but ~7.5/s dropped (the video plane shows ≤30 fps).
+- Debug on the TV: `npm run inspect` and `window.__c101Player` (mode, `video`, `audio.drift()`, `audio.resyncs`). Chrome 68 has no `getVideoPlaybackQuality`: use `webkitDecodedFrameCount` / `webkitDroppedFrameCount`.
+
+## Commands
+
+- `npm run build` (release) / `npm test` (wsola unit test, dev build, test/e2e.mjs against a mock Class101 in Chromium 68, speed.mjs in Chromium 68, speed-e2e.mjs in Google Chrome for H.264/AAC, login.mjs) / `npm run deploy` / `npm run inspect` / `npm run extend`.
+- `node scripts/tv.mjs …` wraps the local LG CLI (`node_modules/.bin/ares-*`); `package` bundles dist/ + service/.
+- `npm run tv:login` hands a browser login to the TV (TV on, app installed).
+
+## Rules
+
+- Never print, log or commit a user's password or tokens. The session (refresh token) lives only in the TV app's localStorage (`c101:session`).
+- Key handling only for `event.isTrusted` events; screens claim keys with `useKeys()`, App.jsx handles defaults.
+- Focus targets carry `data-fk`; App restores focus by key when popping back.
+- No download or save features: the app streams like the website does.

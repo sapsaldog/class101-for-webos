@@ -1,0 +1,82 @@
+/* ---- Overlays ---- */
+.c101-layer {
+  position: fixed; left: 0; top: 0; width: 100vw; height: 100vh;
+  z-index: 2147483647; pointer-events: none;
+  font-family: "Pretendard", "Pretendard Variable", "LG Smart UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  color: #fff; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em;
+}
+.c101-layer * { box-sizing: border-box; }
+
+.c101-toast {
+  position: absolute; top: 28px; left: 50%; transform: translateX(-50%);
+  max-width: 80vw; padding: 12px 24px; border-radius: 999px;
+  background: rgba(20, 20, 20, 0.88); border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  opacity: 0; transition: opacity 0.18s ease;
+}
+.c101-toast[data-show] { opacity: 1; }
+
+.c101-osd {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 72px 48px 32px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.55) 60%, rgba(0, 0, 0, 0));
+  opacity: 0; transition: opacity 0.2s ease;
+}
+.c101-osd[data-show] { opacity: 1; }
+.c101-osd__top { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+.c101-osd__title { font-size: 26px; font-weight: 700; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c101-osd__badge { font-size: 18px; font-weight: 700; padding: 3px 12px; border-radius: 999px; background: #ff6a2b; }
+.c101-osd__badge[hidden] { display: none; }
+.c101-osd__bar { position: relative; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.22); overflow: hidden; }
+.c101-osd__buffer, .c101-osd__fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 4px; }
+.c101-osd__buffer { background: rgba(255, 255, 255, 0.35); }
+.c101-osd__fill { background: #ff6a2b; }
+.c101-osd__row { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; gap: 24px; }
+.c101-osd__time { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.c101-osd__hint { font-size: 16px; color: rgba(255, 255, 255, 0.72); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.c101-center {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  min-width: 120px; padding: 18px 30px; border-radius: 24px;
+  background: rgba(0, 0, 0, 0.6); text-align: center;
+  font-size: 34px; font-weight: 800; opacity: 0; transition: opacity 0.18s ease;
+}
+.c101-center[data-show] { opacity: 1; }
+
+.c101-menu {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 400px;
+  padding: 40px 28px; background: rgba(16, 16, 16, 0.94);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  transform: translateX(100%); transition: transform 0.2s ease;
+}
+.c101-menu[data-show] { transform: none; }
+.c101-menu__title { font-size: 24px; font-weight: 800; margin: 0 8px 20px; }
+.c101-menu__item {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 21px; font-weight: 600; padding: 14px 18px; margin-bottom: 6px; border-radius: 12px;
+  color: rgba(255, 255, 255, 0.86);
+}
+.c101-menu__item[data-selected] { background: #fff; color: #111; }
+.c101-menu__item[data-disabled] { opacity: 0.38; }
+.c101-menu__value { font-weight: 800; }
+.c101-menu__foot { position: absolute; left: 28px; right: 28px; bottom: 28px; font-size: 15px; color: rgba(255, 255, 255, 0.6); }
+
+.c101-help {
+  position: absolute; inset: 0; display: none;
+  background: rgba(8, 8, 8, 0.95); padding: 44px 64px; overflow: hidden;
+}
+.c101-help[data-show] { display: block; }
+.c101-help h2 { margin: 0 0 6px; font-size: 30px; font-weight: 800; }
+.c101-help p { margin: 0 0 26px; font-size: 17px; color: rgba(255, 255, 255, 0.65); }
+.c101-help__cols { display: flex; gap: 56px; }
+.c101-help__col { flex: 1; }
+.c101-help h3 { margin: 0 0 12px; font-size: 20px; color: #ff8a57; }
+.c101-help dl { margin: 0; display: grid; grid-template-columns: 150px 1fr; row-gap: 10px; column-gap: 16px; font-size: 18px; }
+.c101-help dt { font-weight: 800; }
+.c101-help dd { margin: 0; color: rgba(255, 255, 255, 0.86); }
+
+.c101-curtain {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+  background: #000; font-size: 24px; font-weight: 600; color: rgba(255, 255, 255, 0.8);
+}
+.c101-curtain[data-show] { display: flex; }
