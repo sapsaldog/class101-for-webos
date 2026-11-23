@@ -283,6 +283,29 @@ try {
   await page.waitFor(`document.querySelectorAll('.card').length === 6 && /기초 다지기/.test(document.querySelector('[data-fk="class-k1"] .card__meta').textContent)`, 10000, 'home after l2').catch(() => {});
   check('Back from the player shows the lesson saved last on the class card (l2)', /기초 다지기/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
   check('…with the hero focused again', (await active()) === 'hero', await active());
+
+  // The resume lookup (TvLesson) fails once: the player asks again before playing and
+  // resumes at the saved 30 s, instead of starting at 0 and saving that over it.
+  mock.fail.lessonErrors = { l2: 1 };
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 25; })()`, 12000, 'resume after a retried lookup').catch(() => {});
+  check('a failed resume lookup is asked again, and playback resumes at the saved position', await page.eval(`(() => { const v = document.querySelector('video'); return !!v && v.currentTime >= 29; })()`));
+  await press(KEY.BACK);
+  await page.waitFor(`!!document.querySelector('.home') && document.activeElement && document.activeElement.getAttribute('data-fk') === 'hero'`, 8000, 'home again');
+  // It keeps failing: the player says so, doesn't play, and saves nothing.
+  mock.fail.lessonErrors = { l2: 5 };
+  const savesBeforeLookup = calls.progress.length;
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`!!document.querySelector('.player__msg')`, 12000, 'lookup error').catch(() => {});
+  await sleep(500);
+  check(
+    'a resume lookup that keeps failing stops with a message, without playing or saving',
+    (await page.eval(`!!document.querySelector('.player__msg') && /이어볼 위치/.test(document.querySelector('.player__msg').textContent) && !document.querySelector('video')`)) && calls.progress.length === savesBeforeLookup,
+    calls.progress.slice(savesBeforeLookup)
+  );
+  mock.fail.lessonErrors = {};
+  await press(KEY.BACK);
+  await page.waitFor(`!!document.querySelector('.home') && document.activeElement && document.activeElement.getAttribute('data-fk') === 'hero'`, 8000, 'home after the error');
   await press(KEY.DOWN, 'ArrowDown');
 
   // Finding a class: ▲▲ to the top bar's 클래스 찾기, search, open a result, come back.

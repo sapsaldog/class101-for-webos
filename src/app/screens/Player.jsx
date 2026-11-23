@@ -16,6 +16,7 @@ import {
   signedInAs,
 } from '../api.js';
 import { KEY, arrowOf, colorOf, digitOf, isBack } from '../keys.js';
+import { AuthError } from '../auth.js';
 import {
   toast,
   flashCenter,
@@ -36,6 +37,7 @@ const SETTINGS = 'c101:player';
 const SAVE_EVERY_MS = 15000;
 const NEXT_UP_SECONDS = 8;
 const PLAYTIME_EVERY = 10; // seconds of lecture per watch-time report, as on class101.net
+const LESSON_TRIES = 3; // the resume lookup, before giving up on playing
 const VIEW_SESSION_DELAY = 10; // seconds after opening / play / pause
 
 function loadSettings() {
@@ -122,12 +124,23 @@ export default function Player({ klassId, lectureId, lectures }) {
   useEffect(() => {
     let alive = true;
     showCurtain(true, '강의를 불러오는 중…');
+    // The lesson holds where to resume. Playing without it would start at 0 and soon
+    // save that over the real position, so it is asked again, and the player doesn't
+    // start if it keeps failing (the site doesn't render its player without it either).
+    const lessonWithRetry = (n = 1) =>
+      fetchLesson(lectureId).catch((err) => {
+        if (!alive || n >= LESSON_TRIES || err instanceof AuthError) throw err;
+        return new Promise((r) => setTimeout(r, 1000 * n)).then(() => lessonWithRetry(n + 1));
+      });
     Promise.all([
       fetchLecture(lectureId),
       // After this lesson's queued position saves, so a quick reopen resumes from the newest one.
       lessonSaved(lectureId)
-        .then(() => fetchLesson(lectureId))
-        .catch(() => null),
+        .then(() => lessonWithRetry())
+        .catch((err) => {
+          if (err instanceof AuthError) throw err;
+          throw new Error(`이어볼 위치를 불러오지 못해서 재생하지 않았어요. ${err.message}`);
+        }),
       s.list ? null : curriculum(klassId).then(flattenLectures).catch(() => null),
     ])
       .then(([lec, les, list]) => {

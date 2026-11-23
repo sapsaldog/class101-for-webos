@@ -113,6 +113,17 @@ api.saveProgress('E', 4);
 await flush();
 check('a save that failed on the network goes out again with the next step', saves() === 'E@4 E@4', saves());
 
+// A failed save with nothing after it is tried again a little later (2 s first).
+reset();
+holding = false;
+failNext.F = 1;
+api.saveProgress('F', 8);
+await flush();
+check('a lone failed save goes out once at first', saves() === 'F@8', saves());
+await new Promise((r) => setTimeout(r, 2300));
+await flush();
+check('…and is retried a little later', saves() === 'F@8 F@8', saves());
+
 // lessonSaved() waits for that lesson's queued saves.
 reset();
 holding = true;

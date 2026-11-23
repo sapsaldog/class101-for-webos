@@ -213,23 +213,33 @@ export function writing() {
 // was opened with; the save is dropped if another one is signed in by then.
 let saving = Promise.resolve();
 const unsent = {}; // "<who> <lessonId>" → newest position not sent yet
-let lastSent = null; // { key, value, at } of the save that went out last
+let lastSent = null; // { key, value, at } of the save confirmed last
 const lessonStep = {}; // "<who> <lessonId>" → its newest queued step
+// A save turned down or failed, with no later step to carry it, is tried again a few
+// times. (The site doesn't retry at all; nothing is kept across an app restart.)
+const RETRY_MS = [2000, 5000, 15000];
+const retries = {}; // key → { tries, timer }
+
 export function saveProgress(lessonId, progressSeconds, who = account()) {
   const key = `${who} ${lessonId}`;
   unsent[key] = Math.max(0, Math.round(progressSeconds));
+  return enqueue(key, lessonId, who);
+}
+
+function enqueue(key, lessonId, who) {
   const step = () => {
     const value = unsent[key];
     if (value === undefined) return null; // merged into an earlier step
     delete unsent[key];
     // Leaving saves twice (Back, then unmount): skip the same position of the same lesson
-    // saved just before, with no other lesson in between.
+    // confirmed just before, with no other lesson in between.
     if (lastSent && lastSent.key === key && lastSent.value === value && Date.now() - lastSent.at < 5000) return null;
     lastSent = null; // set again only once this one is confirmed
-    // Not confirmed: unless a newer position is waiting, hand this one to the next
-    // step for the lesson (a save merged into this one, or the next save).
+    // Not confirmed: unless a newer position is waiting, hand this one to the next step
+    // for the lesson (a save merged into this one, or a retry a little later).
     const putBack = () => {
       if (unsent[key] === undefined) unsent[key] = value;
+      retryLater(key, lessonId, who);
     };
     return gql(
       'TvSetLessonProgress',
@@ -241,8 +251,9 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
     ).then(
       (data) => {
         // Only a confirmed save counts (the site checks the answer the same way).
-        if (data.setLessonProgress) lastSent = { key, value, at: Date.now() };
-        else putBack();
+        if (!data.setLessonProgress) return putBack();
+        lastSent = { key, value, at: Date.now() };
+        delete retries[key];
       },
       () => {
         putBack();
@@ -253,6 +264,16 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
   saving = saving.then(step, step);
   lessonStep[key] = saving;
   return write(saving);
+}
+
+function retryLater(key, lessonId, who) {
+  const r = retries[key] || (retries[key] = { tries: 0, timer: 0 });
+  if (r.timer || r.tries >= RETRY_MS.length) return;
+  r.timer = setTimeout(() => {
+    r.timer = 0;
+    r.tries++;
+    if (unsent[key] !== undefined) enqueue(key, lessonId, who); // nothing sent it meanwhile
+  }, RETRY_MS[r.tries]);
 }
 
 // Resolves when the lesson's queued position saves are done (and so every save queued

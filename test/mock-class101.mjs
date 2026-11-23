@@ -24,7 +24,8 @@ const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], view
 // token refresh answers INVALID_REFRESH_TOKEN (the login was revoked meanwhile).
 // state.morePages = true: the class list has a second page.
 const hold = {};
-const fail = { refresh: false, saveFalseFor: null, expireOnPage2: false };
+// fail.lessonErrors[lessonId] = n: that lesson's next n TvLesson lookups fail.
+const fail = { refresh: false, saveFalseFor: null, expireOnPage2: false, lessonErrors: {} };
 const state = { morePages: false };
 let base = '';
 
@@ -111,6 +112,10 @@ function graphql(body, auth) {
       };
     }
     case 'TvLesson':
+      if (fail.lessonErrors[v.lessonId] > 0) {
+        fail.lessonErrors[v.lessonId]--;
+        return { errors: [{ message: 'Gateway timeout', extensions: { code: 'INTERNAL_SERVER_ERROR' } }], data: null };
+      }
       return {
         data: {
           lesson: {
