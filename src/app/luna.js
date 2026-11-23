@@ -4,6 +4,14 @@ export function hasLuna() {
   return typeof window.PalmServiceBridge === 'function';
 }
 
+// Rejections carry `uncertain` when the call may still have reached the service (a
+// timeout or an unreadable reply), and `response` when Luna answered with an error.
+function uncertain(message) {
+  const err = new Error(message);
+  err.uncertain = true;
+  return err;
+}
+
 export function lunaCall(uri, params, { timeout = 25000 } = {}) {
   return new Promise((resolve, reject) => {
     const bridge = new window.PalmServiceBridge();
@@ -13,7 +21,7 @@ export function lunaCall(uri, params, { timeout = 25000 } = {}) {
       } catch (e) {
         /* ignore */
       }
-      reject(new Error('luna timeout'));
+      reject(uncertain('luna timeout'));
     }, timeout);
     bridge.onservicecallback = (msg) => {
       clearTimeout(timer);
@@ -21,10 +29,13 @@ export function lunaCall(uri, params, { timeout = 25000 } = {}) {
       try {
         res = JSON.parse(msg);
       } catch (e) {
-        return reject(new Error('bad luna response'));
+        return reject(uncertain('bad luna response'));
       }
-      if (res.returnValue === false) reject(new Error(res.errorText || 'luna call failed'));
-      else resolve(res);
+      if (res.returnValue === false) {
+        const err = new Error(res.errorText || 'luna call failed');
+        err.response = res; // e.g. our service's { relayError: true } for network errors
+        reject(err);
+      } else resolve(res);
     };
     bridge.call(uri, JSON.stringify(params || {}));
   });

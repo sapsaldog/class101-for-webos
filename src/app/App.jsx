@@ -68,9 +68,12 @@ export default function App() {
       pop: () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)),
       replace: (name, props) => setStack((s) => s.slice(0, -1).concat(entry(name, props))),
       reset: (name, props) => setStack([entry(name, props)]),
-      // Any screen can hand us an error; an expired login sends everyone back to the login screen.
+      // Any screen can hand us an error. A login that is really gone (refresh token
+      // rejected, or none) sends everyone back to the login screen. A network failure
+      // while refreshing keeps the session for the next try: social-login accounts
+      // would otherwise need the computer hand-over again.
       fail: (err) => {
-        if (err instanceof AuthError) {
+        if (err instanceof AuthError && (err.code === 'SESSION_EXPIRED' || err.code === 'NO_SESSION')) {
           signOut();
           setStack([entry('login', { message: err.message })]);
           return true;
@@ -96,17 +99,28 @@ export default function App() {
 
   // Login handed over from a computer (accounts without a password: scripts/tv-login.mjs).
   useEffect(() => {
+    let attempts = 0;
     function adopt(params) {
       if (!params || !params.c101RefreshToken) return;
+      const attempt = ++attempts; // a newer hand-over wins over one still on the way
       setStack([entry('login', { pending: true })]);
       adoptRefreshToken(params.c101RefreshToken, params.email)
         .then((user) => {
+          if (attempt !== attempts) return;
           toast(`${user && user.email ? user.email + ' 계정으로 ' : ''}로그인했어요`, 3000);
           setStack([entry('home')]);
         })
         .catch((err) => {
-          signOut();
-          setStack([entry('login', { message: `받은 로그인 정보로 로그인하지 못했어요. ${err.message}` })]);
+          if (attempt !== attempts || err.code === 'SESSION_CHANGED') return;
+          if (err.code === 'SESSION_EXPIRED') {
+            // Class101's Firebase rejected the token: it is no use keeping it.
+            signOut();
+            setStack([entry('login', { message: `받은 로그인 정보로 로그인하지 못했어요. ${err.message}` })]);
+            return;
+          }
+          // A network failure: keep the handed-over login, and let 내 클래스 try again.
+          toast(`로그인 정보를 아직 확인하지 못했어요. ${err.message}`, 4000);
+          setStack([entry('home')]);
         });
     }
     adopt(launchParams());

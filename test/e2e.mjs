@@ -36,11 +36,16 @@ function check(name, ok, detail) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}${!ok && detail !== undefined ? `  → ${JSON.stringify(detail)}` : ''}`);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms) {
+  const end = Date.now() + ms;
+  while (!fn() && Date.now() < end) await sleep(100);
+  return fn();
+}
 
 // ---------------------------------------------------------------- mock Class101
 
 const mock = await startMock();
-const { base, calls } = mock;
+const { base, calls } = mock; // mock.hold delays answers per operation
 const server = { close: mock.close };
 
 // ---------------------------------------------------------------- run
@@ -68,7 +73,7 @@ const videoState = `(() => { const v = document.querySelector('video'); return v
 try {
   // Point the app at the mock and start clean.
   await page.goto(`${base}/index.html`);
-  await page.eval(`localStorage.clear(); localStorage.setItem('c101:endpoints', ${JSON.stringify(JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql` }))}); location.reload();`).catch(() => {});
+  await page.eval(`localStorage.clear(); localStorage.setItem('c101:endpoints', ${JSON.stringify(JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql`, api: `${base}/api` }))}); location.reload();`).catch(() => {});
   await page.waitFor(`!!document.querySelector('.login input[type=email]')`, 8000, 'login screen');
   await page.waitFor(`document.activeElement && document.activeElement.getAttribute('data-fk') === 'email'`, 3000, 'email focus').catch(() => {});
   check('starts on the login screen with the email field focused', (await active()) === 'email', await active());
@@ -87,6 +92,11 @@ try {
   await press(KEY.ENTER, 'Enter');
   await page.waitFor(`document.querySelectorAll('.card').length === 6`, 8000, 'home with 6 classes');
   check('login lands on 내 클래스 with the class grid', true);
+  check(
+    'class progress is shown as the percentage the API sends (1 → 1%, not 100%)',
+    (await page.eval(`document.querySelector('[data-fk="class-k2"] .progress i').style.width`)) === '1%',
+    await page.eval(`document.querySelector('[data-fk="class-k2"] .progress i').style.width`)
+  );
   await page.waitFor(`document.activeElement && document.activeElement.getAttribute('data-fk') === 'hero'`, 3000, 'hero focus').catch(() => {});
   check('continue-watching hero is focused', (await active()) === 'hero', await active());
   await sleep(500);
@@ -119,12 +129,27 @@ try {
   let vs = await page.eval(videoState);
   check('player resumes at the saved position (30 s)', vs.t >= 29 && vs.t < 40, vs);
 
+  // What class101.net's lecture page reports, so Class101 moves 이어보기 and progress.
+  await until(() => calls.views.length && calls.enter.length, 3000);
+  check('opening a lecture records the view (updateUserViewHistory)', calls.views.some(([k, l]) => k === 'k1' && l === 'l2'), calls.views);
+  check('…and enters it with the class ticket (enterLecture)', calls.enter.some(([t, l]) => t === 'ticket-k1' && l === 'l2'), calls.enter);
+  await until(() => calls.playtime.length && calls.sessions.length, 15000);
+  const pt = calls.playtime[0] || { body: {} };
+  check(
+    '10 s of playback reports watch time for the lesson',
+    pt.lessonId === 'l2' && pt.body.videoId === 'v-l2' && pt.body.interval === 10 && pt.body.playbackLocation >= 39,
+    pt
+  );
+  check('…with the login token, a timestamp and a request id', pt.authOk === true && !isNaN(Date.parse(pt.body.timestamp)) && /^[0-9a-f-]{36}$/.test(pt.requestId || ''), pt);
+  check('the view session opens 10 s after playback starts (no sessionId yet)', calls.sessions.length === 1 && calls.sessions[0][0] === '(none)' && calls.sessions[0][1] === 'l2' && calls.sessions[0][2] === true, calls.sessions);
+
   await sleep(600);
   await shot('04-player');
 
+  const beforeSeek = (await page.eval(videoState)).t;
   await press(KEY.RIGHT, 'ArrowRight');
   vs = await page.eval(videoState);
-  check('▶ seeks +10 s', vs.t >= 39, vs);
+  check('▶ seeks +10 s', vs.t - beforeSeek >= 9 && vs.t - beforeSeek < 12, { before: beforeSeek, after: vs.t });
   await press(KEY.ENTER, 'Enter');
   check('OK pauses', (await page.eval(videoState)).paused);
   await press(KEY.ENTER, 'Enter');
@@ -152,7 +177,7 @@ try {
   // End of lecture → next-up countdown → next lecture.
   await page.eval(`(() => { const v = document.querySelector('video'); v.currentTime = v.duration - 1; })()`);
   await page.waitFor(`!!document.querySelector('.next-up')`, 8000, 'next-up');
-  check('ending a lecture marks it complete', calls.complete.includes('l2'), calls.complete);
+  check('ending a lecture leaves finishing it to Class101 (no completeLectureV3, as on the site)', calls.complete.length === 0, calls.complete);
   check('next-up card shows the next lecture', /실전 연습/.test(await page.eval(`document.querySelector('.next-up').textContent`)));
   await shot('06-next-up');
   await press(KEY.ENTER, 'Enter');
@@ -160,19 +185,129 @@ try {
   check('OK on next-up plays the next lecture', true);
   check('remembered speed carries to the next lecture', (await page.eval(videoState)).rate === 1.25);
 
-  // CH▼ goes back a lecture; CH▲ at the last open lecture says so.
+  // CH▼ goes back a lecture, while the server is slow with position saves (4 s each):
+  // l3's exit save must still reach it before l2's first one, since the lesson saved
+  // last is the class's last lesson.
+  mock.hold.TvSetLessonProgress = 4000;
+  const holdAt = Date.now();
+  await until(() => calls.timeline.some((e) => e.op === 'TvSetLessonProgress' && e.lessonId === 'l3' && e.at >= holdAt), 8000);
+  await sleep(1200); // l3 plays on, so its exit save has a position of its own
   await press(KEY.CH_DOWN, 'PageDown');
   await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture1/.test(v.currentSrc); })()`, 10000, 'previous lecture');
   check('CH▼ goes to the previous lecture', true);
+  await until(() => calls.timeline.some((e) => e.op === 'TvSetLessonProgress' && e.lessonId === 'l2' && e.at >= holdAt), 15000);
+  mock.hold.TvSetLessonProgress = 0;
+  await until(() => calls.timeline.filter((e) => e.op === 'TvSetLessonProgress').every((e) => e.doneAt), 10000); // let the held ones finish
+  const savesSince = calls.timeline.filter((e) => e.op === 'TvSetLessonProgress' && e.at >= holdAt).map((e) => e.lessonId);
+  check(
+    'a slow save of the lecture left behind still lands before the next lecture\'s',
+    savesSince.length >= 3 && savesSince.lastIndexOf('l3') < savesSince.indexOf('l2') && savesSince[savesSince.length - 1] === 'l2',
+    savesSince
+  );
 
   // Back to the class screen, focus where we were, then home.
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.lec').length === 4`, 8000, 'back to class');
   check('Back leaves the player for the class screen', true);
   check('leaving the player saved progress again', calls.progress.length >= 2, calls.progress.length);
+
+  // Another lecture from the list, played a little (its position is saved, which is
+  // what moves a class's last lesson on Class101), then Back: once the player's writes
+  // are done, the class screen asks Class101 again and its 이어보기 follows.
+  await page.eval(`document.querySelector('[data-fk="lec-l3"]').click()`);
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'l3 from the list');
+  await sleep(1500);
+  // The server turns down the first exit save (setLessonProgress: false). The second
+  // save on leaving (unmount) carries the same position and must still go out.
+  mock.fail.saveFalseFor = 'l3';
+  const savesBefore = calls.progress.length;
+  await press(KEY.BACK);
+  await page.waitFor(`document.querySelectorAll('.lec').length === 4`, 8000, 'back to class again');
+  await until(() => calls.progress.slice(savesBefore).filter(([id]) => id === 'l3').length >= 2, 6000); // tried again after 2 s
+  mock.fail.saveFalseFor = null;
+  const exitPair = calls.progress.slice(savesBefore).filter(([id]) => id === 'l3');
+  check(
+    'a save the server turns down isn\'t counted: the same position is tried again',
+    exitPair.length >= 2 && exitPair[0][1] === exitPair[1][1],
+    exitPair
+  );
+  await page.waitFor(`!!document.querySelector('.lec.current[data-fk="lec-l3"]')`, 5000, 'class screen follows').catch(() => {});
+  check(
+    'the class screen\'s 이어보기 follows the lesson saved last (asked again after the player)',
+    await page.eval(`!!document.querySelector('.lec.current[data-fk="lec-l3"]') && /실전 연습/.test(document.querySelector('.klass__side').textContent)`)
+  );
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.card').length === 6`, 8000, 'back home');
   check('Back again returns to 내 클래스 with the class card focused', (await active()) === 'class-k1', await active());
+  await page.waitFor(`document.querySelector('[data-fk="class-k1"] .progress i').style.width === '50%'`, 5000, 'k1 progress').catch(() => {});
+  check(
+    '내 클래스 shows the progress the server now reports (l2 got watch time: 2 of 4 done)',
+    (await page.eval(`document.querySelector('[data-fk="class-k1"] .progress i').style.width`)) === '50%',
+    await page.eval(`document.querySelector('[data-fk="class-k1"] .progress i').style.width`)
+  );
+  check('the class card shows the lesson saved last (l3)', /실전 연습/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
+
+  // 이어보기 opens that lesson (l3).
+  await press(KEY.UP, 'ArrowUp');
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'hero playback').catch(() => {});
+  check('이어보기 opens the class\'s last lesson (l3)', await page.eval(`(() => { const v = document.querySelector('video'); return !!v && /lecture2/.test(v.currentSrc); })()`));
+  // CH▼ to l2 and play on, then leave while the server holds the exit save for 1.5 s and
+  // press OK on 이어보기 at once. The cached list still says l3: 이어보기 must wait for
+  // the reload and open l2, the lesson saved last.
+  await press(KEY.CH_DOWN, 'PageDown');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture1/.test(v.currentSrc) && !v.paused; })()`, 10000, 'l2 from the hero');
+  await press(KEY.RIGHT, 'ArrowRight');
+  await sleep(1500);
+  mock.hold.TvSetLessonProgress = 1500;
+  const backAt = Date.now();
+  await press(KEY.BACK);
+  await page.waitFor(`!!document.querySelector('.home') && document.activeElement && document.activeElement.getAttribute('data-fk') === 'hero'`, 5000, 'home, hero focused');
+  const cachedSaysL3 = /실전 연습/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`));
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture1/.test(v.currentSrc); })()`, 10000, 'player after the reload').catch(() => {});
+  mock.hold.TvSetLessonProgress = 0;
+  check(
+    '이어보기 pressed while 내 클래스 reloads waits for it, then opens the lesson saved last (l2)',
+    cachedSaysL3 && (await page.eval(`(() => { const v = document.querySelector('video'); return !!v && /lecture1/.test(v.currentSrc); })()`)),
+    { cachedSaysL3 }
+  );
+  const reload = calls.timeline.find((e) => e.op === 'TvTakingClasses' && e.at >= backAt);
+  const exitSaves = calls.timeline.filter((e) => e.op === 'TvSetLessonProgress' && e.at >= backAt - 100 && (!reload || e.at < reload.at));
+  check(
+    '내 클래스 reloads only after the server answered the player\'s exit save',
+    exitSaves.length > 0 && exitSaves.every((e) => e.lessonId === 'l2' && e.doneAt) && !!reload && reload.at >= Math.max(...exitSaves.map((e) => e.doneAt)),
+    { exitSaves: exitSaves.map((e) => [e.lessonId, e.at - backAt, e.doneAt - backAt]), reloadAt: reload && reload.at - backAt }
+  );
+  await press(KEY.BACK);
+  await page.waitFor(`document.querySelectorAll('.card').length === 6 && /기초 다지기/.test(document.querySelector('[data-fk="class-k1"] .card__meta').textContent)`, 10000, 'home after l2').catch(() => {});
+  check('Back from the player shows the lesson saved last on the class card (l2)', /기초 다지기/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
+  check('…with the hero focused again', (await active()) === 'hero', await active());
+
+  // The resume lookup (TvLesson) answers once without its video data (an error on that
+  // field): the player asks again before playing and resumes at the saved 30 s, instead
+  // of starting at 0 and saving that over it.
+  mock.fail.lessonPartial = { l2: 1 };
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 25; })()`, 12000, 'resume after a retried lookup').catch(() => {});
+  check('a failed resume lookup is asked again, and playback resumes at the saved position', await page.eval(`(() => { const v = document.querySelector('video'); return !!v && v.currentTime >= 29; })()`));
+  await press(KEY.BACK);
+  await page.waitFor(`!!document.querySelector('.home') && document.activeElement && document.activeElement.getAttribute('data-fk') === 'hero'`, 8000, 'home again');
+  // It keeps failing: the player says so, doesn't play, and saves nothing.
+  mock.fail.lessonErrors = { l2: 5 };
+  const savesBeforeLookup = calls.progress.length;
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`!!document.querySelector('.player__msg')`, 12000, 'lookup error').catch(() => {});
+  await sleep(500);
+  check(
+    'a resume lookup that keeps failing stops with a message, without playing or saving',
+    (await page.eval(`!!document.querySelector('.player__msg') && /이어볼 위치/.test(document.querySelector('.player__msg').textContent) && !document.querySelector('video')`)) && calls.progress.length === savesBeforeLookup,
+    calls.progress.slice(savesBeforeLookup)
+  );
+  mock.fail.lessonErrors = {};
+  await press(KEY.BACK);
+  await page.waitFor(`!!document.querySelector('.home') && document.activeElement && document.activeElement.getAttribute('data-fk') === 'hero'`, 8000, 'home after the error');
+  await press(KEY.DOWN, 'ArrowDown');
 
   // Finding a class: ▲▲ to the top bar's 클래스 찾기, search, open a result, come back.
   await press(KEY.UP, 'ArrowUp');
@@ -200,6 +335,17 @@ try {
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.home .card').length === 6`, 5000, 'home again');
 
+  // A refresh that fails without the login being expired (503) keeps the session:
+  // 내 클래스 shows the error instead of the login screen.
+  mock.fail.refresh = true;
+  await page.eval(`(() => { window.__beforeReload = true; const s = JSON.parse(localStorage.getItem('c101:session')); s.expiresAt = 0; localStorage.setItem('c101:session', JSON.stringify(s)); location.reload(); })()`).catch(() => {});
+  await page.waitFor(`!window.__beforeReload && !!document.querySelector('.home .error')`, 8000, 'refresh error on home').catch(() => {});
+  check(
+    'a failed token refresh shows an error and keeps the login',
+    await page.eval(`!document.querySelector('.login') && /갱신하지 못했어요/.test((document.querySelector('.home .error') || {}).textContent || '') && !!localStorage.getItem('c101:session')`)
+  );
+  mock.fail.refresh = false;
+
   // Expired ID token is refreshed transparently.
   // The marker dies with the old page, so the wait can't pass before the reload.
   await page.eval(`(() => { window.__beforeReload = true; const s = JSON.parse(localStorage.getItem('c101:session')); s.expiresAt = 0; localStorage.setItem('c101:session', JSON.stringify(s)); location.reload(); })()`).catch(() => {});
@@ -222,6 +368,30 @@ try {
   check('로그아웃 returns to the login screen with the email remembered', await page.eval(`document.querySelector('input[type=email]').value === 'tv@example.com'`));
   check('…and the password field focused', (await active()) === 'password', await active());
 
+  // A login revoked on Class101's side (refresh token rejected) found at startup: the
+  // app goes to the sign-in screen with the reason, instead of loading forever.
+  await page.eval(`(() => { window.__beforeReload = true; localStorage.setItem('c101:session', JSON.stringify({ sid: 'x', email: 'tv@example.com', idToken: '', refreshToken: 'revoked', expiresAt: 0 })); location.reload(); })()`).catch(() => {});
+  await page.waitFor(`!window.__beforeReload && !!document.querySelector('.login')`, 8000, 'sign-in after a revoked login').catch(() => {});
+  check(
+    'a revoked login at startup goes to the sign-in screen with the reason',
+    await page.eval(`!!document.querySelector('.login') && /만료/.test((document.querySelector('.login .error') || {}).textContent || '') && !localStorage.getItem('c101:session')`)
+  );
+
+  // The login is revoked while 더 보기 loads page two: the app goes to sign-in instead
+  // of leaving the button on "불러오는 중…".
+  mock.state.morePages = true;
+  await page.eval(`(() => { window.__beforeReload = true; localStorage.setItem('c101:session', JSON.stringify({ sid: 'y', email: 'tv@example.com', idToken: 'tok-1', refreshToken: 'ref-1', expiresAt: Date.now() + 3600000 })); location.reload(); })()`).catch(() => {});
+  await page.waitFor(`!window.__beforeReload && !!document.querySelector('[data-fk="more"]')`, 8000, '더 보기 shown').catch(() => {});
+  mock.fail.expireOnPage2 = true;
+  await page.eval(`document.querySelector('[data-fk="more"]').click()`);
+  await page.waitFor(`!!document.querySelector('.login')`, 8000, 'sign-in after 더 보기').catch(() => {});
+  check(
+    'a login revoked during 더 보기 goes to the sign-in screen with the reason',
+    await page.eval(`!!document.querySelector('.login') && /만료/.test((document.querySelector('.login .error') || {}).textContent || '')`)
+  );
+  mock.fail.expireOnPage2 = false;
+  mock.state.morePages = false;
+
   // Login handed over from the Mac (Google accounts): refresh token in launch params.
   const handover = async (token) => {
     const p2 = await Page.open(browser.port);
@@ -240,6 +410,18 @@ try {
   check('a refresh token from the Mac logs the TV in (no typing)', await good.eval(`document.querySelectorAll('.card').length === 6`));
   check('…and shows the handed-over account', await good.eval(`/google-user@example.com/.test(document.querySelector('.topbar').textContent)`));
   good.close();
+  // A hand-over that meets a network failure (refresh answers 503) keeps the login it
+  // was given and goes to 내 클래스, which tries again; nothing to redo on the computer.
+  await page.eval(`localStorage.removeItem('c101:session')`);
+  mock.fail.refresh = true;
+  const flaky = await handover('ref-1');
+  await flaky.waitFor(`!!document.querySelector('.home')`, 8000, 'home after a flaky hand-over').catch(() => {});
+  check(
+    'a hand-over that hits a network failure keeps the login and opens 내 클래스',
+    await flaky.eval(`!!document.querySelector('.home') && !document.querySelector('.login') && !!(JSON.parse(localStorage.getItem('c101:session') || '{}').refreshToken)`)
+  );
+  mock.fail.refresh = false;
+  flaky.close();
   await page.eval(`localStorage.removeItem('c101:session')`);
   const bad = await handover('revoked-token');
   await bad.waitFor(`!!document.querySelector('.login .error') && /로그인하지 못했어요/.test(document.querySelector('.login .error').textContent)`, 8000, 'hand-over error').catch(() => {});

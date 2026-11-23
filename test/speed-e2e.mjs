@@ -45,7 +45,7 @@ try {
   await page.goto(`${base}/index.html`);
   await page.eval(`(() => {
     localStorage.clear();
-    localStorage.setItem('c101:endpoints', ${JSON.stringify(JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql` }))});
+    localStorage.setItem('c101:endpoints', ${JSON.stringify(JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql`, api: `${base}/api` }))});
     localStorage.setItem('c101:session', JSON.stringify({ email: 'tv@example.com', idToken: 'tok-1', refreshToken: 'ref-1', expiresAt: Date.now() + 3600000 }));
     localStorage.setItem('c101:player', JSON.stringify({ rate: 1.25, captions: '' }));
     location.reload();
@@ -66,6 +66,17 @@ try {
   check('content advances ~1.25 s per second', contentRate > 1.15 && contentRate < 1.35, contentRate.toFixed(2));
   const audio = await page.eval(`(() => { const a = window.__c101Player.audio; return { sources: a.sources.length, drift: Math.round(a.drift() * 1000) + 0, ctx: a.ctx && a.ctx.state }; })()`);
   check('stretched audio is scheduled and within ±200 ms of the picture', audio.sources > 0 && Math.abs(audio.drift) <= 200 && audio.ctx === 'running', audio);
+
+  // Watch time counts lecture seconds: the first report after 10 s of content (8 s at
+  // 1.25x), at content position ~40 s (media time would be ~32 s).
+  for (let i = 0; i < 100 && !calls.playtime.length; i++) await sleep(100);
+  const pt = calls.playtime[0];
+  const ptWall = (await page.eval(`performance.now()`)) - c0.wall;
+  check(
+    'speed mode reports watch time in content seconds',
+    !!pt && pt.lessonId === 'l2' && pt.body.interval === 10 && pt.body.playbackLocation >= 39 && pt.body.playbackLocation < 46 && ptWall < 9500,
+    pt && { location: pt.body.playbackLocation, afterMs: Math.round(ptWall) }
+  );
 
   await page.eval(`document.querySelector('.player video').dispatchEvent(new Event('x'))`);
   await page.key(40, { key: 'ArrowDown', code: 'ArrowDown' });
@@ -95,7 +106,7 @@ try {
   // Jump near the end and let it finish → completion + next-up.
   await page.key(57, { key: '9', code: 'Digit9' });
   await page.waitFor(`!!document.querySelector('.next-up')`, 20000, 'next-up after end').catch(() => {});
-  check('finishing a lecture in speed mode completes it and offers the next one', !!(await page.eval(`!!document.querySelector('.next-up')`)) && calls.complete.length > 0, calls.complete);
+  check('finishing a lecture in speed mode offers the next one (finishing it is Class101\'s call)', !!(await page.eval(`!!document.querySelector('.next-up')`)) && calls.complete.length === 0, calls.complete);
   check('progress saved in content seconds', calls.progress.some(([id, t]) => t > 30), calls.progress.slice(-3));
   check('no page exceptions', errors.length === 0, errors.slice(0, 5));
 } catch (e) {

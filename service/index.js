@@ -2,6 +2,8 @@
 // request's Accept-Language with the TV menu language (en-CA here), and Class101's
 // gateway picks the language of titles from that header only. Node requests are
 // not touched, so GraphQL goes through here with "ko".
+// Class101's REST API (watch time) comes through here too: its CORS filter rejects
+// the "Origin: null" that requests from a file:// app carry.
 // Runs on the TV's Node (v8 on webOS 5): keep to ES2017 and core modules.
 'use strict';
 
@@ -11,43 +13,95 @@ var https = require('https');
 var service = new Service('com.sapsaldog.class101.service');
 var keepAlive = null;
 
+// The only REST call the app makes.
+var REST_PATH = /^\/v1\/playtime-tracking\/lessons\/[A-Za-z0-9_-]{1,64}\/play$/;
+var DEFAULT_UA = 'Mozilla/5.0 (Web0S; Linux/SmartTV) WebAppManager class101-for-webos';
+
+// Fields come from the caller: take only strings, and for headers only values of the
+// expected shape (Node throws on characters such as CR/LF in a header).
+var PRINTABLE = /^[\x20-\x7e]{1,512}$/;
+var TOKEN = /^[A-Za-z0-9._-]{1,4096}$/;
+var LANGUAGE = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/;
+var REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
+function text(value) {
+  return typeof value === 'string' ? value : '';
+}
+function headerValue(value, pattern) {
+  return typeof value === 'string' && pattern.test(value) ? value : null;
+}
+
 service.register('ping', function (message) {
   message.respond({ returnValue: true, node: process.version });
 });
 
 service.register('gql', function (message) {
   var p = message.payload || {};
-  var body = String(p.body || '');
+  relay(message, 'cdn-production-gateway.class101.net', '/graphql', { 'accept-language': headerValue(p.language, LANGUAGE) || 'ko' });
+});
+
+service.register('rest', function (message) {
+  var p = message.payload || {};
+  var path = text(p.path);
+  if (!REST_PATH.test(path)) {
+    message.respond({ returnValue: false, errorText: 'path not allowed' });
+    return;
+  }
+  var id = headerValue(p.requestId, REQUEST_ID);
+  relay(message, 'api.class101.net', '/api' + path, id ? { 'x-request-id': id } : {});
+});
+
+// POST payload.body (JSON) to host+path with the app's token and answer with the
+// status and body. Failures answer { returnValue: false, relayError: true }, so the
+// app can tell them from a Luna bus error (service missing).
+function relay(message, host, path, extra) {
+  var p = message.payload || {};
+  var answered = false;
+  function answer(reply) {
+    if (answered) return;
+    answered = true;
+    message.respond(reply);
+  }
+  function fail(e) {
+    answer({ returnValue: false, relayError: true, errorText: String((e && e.message) || e) });
+  }
+  var body = text(p.body);
   var headers = {
     'content-type': 'application/json',
     accept: 'application/json',
-    'accept-language': p.language || 'ko',
     // The gateway's WAF answers requests without a User-Agent with a
     // "Human Verification" page (HTTP 405); send the TV's own UA.
-    'user-agent': p.userAgent || 'Mozilla/5.0 (Web0S; Linux/SmartTV) WebAppManager class101-for-webos',
+    'user-agent': headerValue(p.userAgent, PRINTABLE) || DEFAULT_UA,
     'content-length': Buffer.byteLength(body),
   };
-  if (p.token) headers.authorization = 'Bearer ' + p.token;
-  var req = https.request(
-    { method: 'POST', host: 'cdn-production-gateway.class101.net', path: '/graphql', headers: headers },
-    function (res) {
+  Object.keys(extra).forEach(function (k) {
+    headers[k] = extra[k];
+  });
+  if (p.token !== undefined && p.token !== null && p.token !== '') {
+    var token = headerValue(p.token, TOKEN); // a non-string token is refused too
+    if (!token) return fail('bad token');
+    headers.authorization = 'Bearer ' + token;
+  }
+  var req;
+  try {
+    req = https.request({ method: 'POST', host: host, path: path, headers: headers }, function (res) {
       var chunks = [];
       res.on('data', function (c) {
         chunks.push(c);
       });
       res.on('end', function () {
-        message.respond({ returnValue: true, status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
+        answer({ returnValue: true, status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
       });
-    }
-  );
+      res.on('error', fail);
+    });
+  } catch (e) {
+    return fail(e);
+  }
   req.setTimeout(20000, function () {
     req.abort();
   });
-  req.on('error', function (e) {
-    message.respond({ returnValue: false, errorText: String((e && e.message) || e) });
-  });
+  req.on('error', fail);
   req.end(body);
-});
+}
 
 // While the app holds this subscription the service stays up, so screens don't
 // pay a Node cold start on every request.

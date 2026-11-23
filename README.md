@@ -31,7 +31,7 @@ stack can't do by itself. Korean UI only.*
 - **내 클래스**: 이어보기(최근 강의)와 수강 중인 클래스
 - **클래스 찾기**: 검색(PLUS 포함 클래스), 카테고리, 인기 검색어
 - **강의 목록**: 챕터별 커리큘럼, 완료(✓)·잠김(🔒) 표시
-- **재생**: 보던 위치부터 이어보기, 위치 자동 저장(클래스101 웹·앱과 공유), 끝나면 다음 강의 자동 재생, 자막(한·영·일)
+- **재생**: 보던 위치부터 이어보기, 위치와 시청 기록 자동 저장(클래스101 웹·앱과 공유), 끝나면 다음 강의 자동 재생, 자막(한·영·일)
 - **배속 재생**: 0.75~2배, 소리 포함, 목소리 높이 그대로
 
 ## 지원 TV
@@ -135,7 +135,8 @@ app/                 appinfo.json(1280x720, 뒤로 버튼 직접 처리), index.
 src/app/
   main.jsx, App.jsx  화면 스택(로그인 → 내 클래스 → 강의 목록 → 재생)과 리모컨 키 분배, 컴퓨터에서 넘긴 로그인 받기
   auth.js            이메일·비밀번호 로그인(Firebase Auth REST), 넘겨받은 토큰 사용, 토큰 자동 갱신
-  api.js             클래스101 GraphQL: 내 클래스, 이어보기, 검색, 카테고리, 커리큘럼, 영상 주소, 진도 저장
+  api.js             클래스101 GraphQL: 내 클래스, 이어보기, 검색, 카테고리, 커리큘럼, 영상 주소, 진도 저장, 시청 기록
+                     (시청 시간은 클래스101 REST API로)
   screens/*.jsx      Login, Home, Search, Klass, Player
   speedVideo.js      배속 화면(MSE, 줄인 시간축)
   speedAudio.js      배속 소리(Web Audio, 화면 시계에 맞춤)
@@ -144,6 +145,7 @@ src/app/
   focus.js, overlay.js, captions.js, luna.js, polyfills.js
 service/             TV 안에서 도는 Node.js 서비스: GraphQL 요청을 Accept-Language: ko로 대신 보냄
                      (TV 웹 엔진이 언어 헤더를 TV 메뉴 언어로 덮어써서, 그대로 두면 제목이 영어로 옴)
+                     시청 시간도 여기서 보냄 (클래스101 API가 TV 앱에서 바로 온 요청을 CORS로 막음)
 scripts/             build.mjs, worker.mjs, tv.mjs(LG CLI 래퍼), tv-login.mjs(로그인 넘기기), make-icons.mjs
 test/                가짜 클래스101 서버와 옛 크롬(68)으로 돌리는 화면·배속·로그인 테스트
 ```

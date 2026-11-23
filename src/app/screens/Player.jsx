@@ -3,8 +3,20 @@ import { SpeedAudio } from '../speedAudio.js';
 import { SpeedVideo } from '../speedVideo.js';
 import { parseCues, cueAt } from '../captions.js';
 import { Nav, useKeys } from '../App.jsx';
-import { lecture as fetchLecture, lesson as fetchLesson, curriculum, flattenLectures, saveProgress, completeLecture } from '../api.js';
+import {
+  lecture as fetchLecture,
+  lesson as fetchLesson,
+  curriculum,
+  flattenLectures,
+  saveProgress,
+  lessonSaved,
+  openLecture,
+  lectureViewHistory,
+  reportPlaytime,
+  signedInAs,
+} from '../api.js';
 import { KEY, arrowOf, colorOf, digitOf, isBack } from '../keys.js';
+import { AuthError } from '../auth.js';
 import {
   toast,
   flashCenter,
@@ -24,6 +36,9 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const SETTINGS = 'c101:player';
 const SAVE_EVERY_MS = 15000;
 const NEXT_UP_SECONDS = 8;
+const PLAYTIME_EVERY = 10; // seconds of lecture per watch-time report, as on class101.net
+const LESSON_TRIES = 3; // the resume lookup, before giving up on playing
+const VIEW_SESSION_DELAY = 10; // seconds after opening / play / pause
 
 function loadSettings() {
   try {
@@ -67,6 +82,9 @@ export default function Player({ klassId, lectureId, lectures }) {
     tracks: [],
     cues: [],
     mode: 'native',
+    // The account this player was opened with: its saves and reports belong to it,
+    // even the save on unmount after a login hand-over has switched accounts.
+    who: signedInAs(),
     time: () => 0,
     dur: () => NaN,
     seek: () => {},
@@ -106,9 +124,29 @@ export default function Player({ klassId, lectureId, lectures }) {
   useEffect(() => {
     let alive = true;
     showCurtain(true, '강의를 불러오는 중…');
+    // The lesson holds where to resume. Playing without it would start at 0 and soon
+    // save that over the real position, so it is asked again, and the player doesn't
+    // start if it keeps failing (the site doesn't render its player without it either).
+    const lessonWithRetry = (n = 1) =>
+      fetchLesson(lectureId)
+        .then((les) => {
+          // No video data (a missing or failed field) is no answer: it would read as 0.
+          if (!les || !les.video) throw new Error('이어볼 위치가 오지 않았어요.');
+          return les;
+        })
+        .catch((err) => {
+          if (!alive || n >= LESSON_TRIES || err instanceof AuthError) throw err;
+          return new Promise((r) => setTimeout(r, 1000 * n)).then(() => lessonWithRetry(n + 1));
+        });
     Promise.all([
       fetchLecture(lectureId),
-      fetchLesson(lectureId).catch(() => null),
+      // After this lesson's queued position saves, so a quick reopen resumes from the newest one.
+      lessonSaved(lectureId)
+        .then(() => lessonWithRetry())
+        .catch((err) => {
+          if (err instanceof AuthError) throw err;
+          throw new Error(`이어볼 위치를 불러오지 못해서 재생하지 않았어요. ${err.message}`);
+        }),
       s.list ? null : curriculum(klassId).then(flattenLectures).catch(() => null),
     ])
       .then(([lec, les, list]) => {
@@ -141,7 +179,7 @@ export default function Player({ klassId, lectureId, lectures }) {
     if (!force && Math.abs(t - s.savedPos) < 3) return;
     s.savedPos = t;
     s.savedAt = Date.now();
-    saveProgress(lectureId, t).catch(() => {});
+    saveProgress(lectureId, t, s.who).catch(() => {});
   }
 
   // ---- playback plumbing ----
@@ -257,9 +295,10 @@ export default function Player({ klassId, lectureId, lectures }) {
     const onTime = () => {
       if (!v.paused && Date.now() - s.savedAt > SAVE_EVERY_MS) save(false);
     };
-    const onPause = () => save(false);
+    // Every pause saves; the queue skips a repeat of the position just confirmed.
+    const onPause = () => save(true);
+    // Finishing is Class101's call, from watch time (see reportPlaytime).
     const onEnded = () => {
-      completeLecture(lectureId).catch(() => {});
       const next = neighbour(1);
       if (next) setNextUp({ lecture: next, seconds: NEXT_UP_SECONDS });
       else {
@@ -274,8 +313,12 @@ export default function Player({ klassId, lectureId, lectures }) {
       const code = v.error ? v.error.code : 0;
       setMessage(`영상을 재생하지 못했어요. (오류 ${code})`);
     };
+    // Going to the background: pause, and save where we are even if already paused
+    // (a seek while paused has no pause event to save it).
     const onHidden = () => {
-      if (document.hidden && !v.paused) v.pause();
+      if (!document.hidden) return;
+      if (!v.paused) v.pause();
+      save(true);
     };
     v.addEventListener('loadedmetadata', onMeta);
     v.addEventListener('playing', onPlaying);
@@ -292,6 +335,110 @@ export default function Player({ klassId, lectureId, lectures }) {
       v.removeEventListener('ended', onEnded);
       v.removeEventListener('error', onError);
       document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [info]);
+
+  // ---- what class101.net's lecture page reports besides the position ----
+  // The app used to send only the position, and 내 클래스 progress didn't move after
+  // watching on the TV. The site finishes video lectures on Class101's side.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !info) return;
+    const klass = (info.lecture.klass && info.lecture.klass._id) || klassId;
+    if (!klass) return;
+    let alive = true;
+    const who = s.who;
+    openLecture(klass, lectureId, who);
+
+    // View session, like the site: VIEW_SESSION_DELAY s after opening and after the
+    // playing state changes ('playing' / 'pause'), one request at a time, with the id
+    // from the last answer; on errors the wait doubles.
+    let session = null;
+    let playing = false;
+    let wait = VIEW_SESSION_DELAY;
+    let timer = 0;
+    let sending = Promise.resolve();
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const wasPlaying = playing; // the state this report is about, not the one at sending time
+        sending = sending.then(() => {
+          if (!alive) return null;
+          return lectureViewHistory(session, klass, lectureId, wasPlaying, who).then(
+            (id) => {
+              session = id;
+              wait = VIEW_SESSION_DELAY;
+            },
+            () => {
+              if (!alive) return;
+              wait = Math.min(wait * 2, 600);
+              schedule();
+            }
+          );
+        });
+      }, wait * 1000);
+    };
+    const onPlaying = () => {
+      if (playing) return;
+      playing = true;
+      schedule();
+    };
+    const onPaused = () => {
+      if (!playing) return;
+      playing = false;
+      schedule();
+    };
+    schedule();
+    v.addEventListener('playing', onPlaying);
+    v.addEventListener('pause', onPaused);
+
+    // Watch time on the lecture's clock (content seconds), like the site: the sampling
+    // baseline restarts on seeks, pauses and buffering, and steps over 3 s don't count;
+    // a remainder under PLAYTIME_EVERY is dropped (the site does both too). If the
+    // lesson lookup failed, the video id is looked up again when a report is due; an
+    // earned report is sent even if the player closes meanwhile.
+    let videoId = info.lesson && info.lesson.video && info.lesson.video.id;
+    let lookup = null;
+    const withVideoId = () => {
+      if (videoId) return Promise.resolve(videoId);
+      if (!lookup) {
+        lookup = fetchLesson(lectureId)
+          .then((l) => (videoId = (l && l.video && l.video.id) || null), () => null)
+          .then((id) => {
+            lookup = null;
+            return id;
+          });
+      }
+      return lookup;
+    };
+    let last = null;
+    let played = 0;
+    const restart = () => {
+      last = null;
+    };
+    const breaks = ['seeking', 'seeked', 'waiting', 'pause', 'emptied'];
+    breaks.forEach((name) => v.addEventListener(name, restart));
+    const tick = setInterval(() => {
+      const t = s.time();
+      if (v.paused || v.seeking || v.ended || !isFinite(t)) {
+        last = null;
+        return;
+      }
+      if (last !== null && t >= last && t - last <= 3) played += t - last;
+      last = t;
+      if (played >= PLAYTIME_EVERY) {
+        played %= PLAYTIME_EVERY;
+        reportPlaytime(lectureId, withVideoId(), t, PLAYTIME_EVERY, who).catch(() => {});
+      }
+    }, 500);
+
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+      clearInterval(tick);
+      v.removeEventListener('playing', onPlaying);
+      v.removeEventListener('pause', onPaused);
+      breaks.forEach((name) => v.removeEventListener(name, restart));
     };
   }, [info]);
 

@@ -1,14 +1,16 @@
-import { useContext, useEffect, useState } from 'preact/hooks';
+import { useContext, useEffect, useRef, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { myClasses, lastClass } from '../api.js';
-import { currentUser, signOut } from '../auth.js';
+import { myClasses, lastClass, settled } from '../api.js';
+import { currentUser, loginId, signOut, AuthError } from '../auth.js';
 import { focusKey, focusFirst } from '../focus.js';
-import { toggleHelp } from '../overlay.js';
+import { toggleHelp, toast } from '../overlay.js';
 import { percent } from '../format.js';
 
-// Kept across visits so coming back from a class shows the list instantly,
-// then refreshes it (progress changes after watching).
+// Kept across visits so coming back from a class shows the list instantly, then
+// refreshes it (progress changes after watching). It belongs to one login: another
+// account on the same TV never sees it. { who, last, list: { items, pageInfo } }
 let cache = null;
+const cachedFor = (who) => (cache && cache.who === who ? cache : null);
 
 function Progress({ ratio }) {
   return (
@@ -20,47 +22,116 @@ function Progress({ ratio }) {
 
 export default function Home({ restoreFocus }) {
   const nav = useContext(Nav);
-  const [data, setData] = useState(cache);
+  const who = loginId();
+  const mine = cachedFor(who);
+  const [data, setData] = useState(mine && mine.list); // the class list
+  const [hero, setHero] = useState(mine && mine.last); // the last class, shown on its own
   const [error, setError] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
   const user = currentUser();
+  // st.last: the last class as Class101 answered after the player's writes (fresh);
+  // refreshing: that reload, until it lands (the list on screen is cached till then);
+  // list: the list on screen, for 더 보기.
+  const st = useRef({ alive: true, last: null, fresh: false, refreshing: null, resuming: false, list: mine && mine.list });
 
   useEffect(() => {
-    let alive = true;
-    Promise.all([lastClass().catch(() => null), myClasses()])
-      .then(([last, list]) => {
-        if (!alive) return;
-        cache = { last, items: list.items, pageInfo: list.pageInfo };
-        setData(cache);
-      })
-      .catch((err) => {
-        if (!alive || nav.fail(err)) return;
-        setError(err.message);
+    const now = st.current;
+    now.alive = true;
+    const load = () =>
+      Promise.all([lastClass().then((l) => ({ l }), () => null), myClasses().then((r) => ({ r }), (err) => ({ err }))]).then(([a, b]) => {
+        if (!now.alive) return;
+        if (loginId() !== who) {
+          // Signed out under us (the refresh token was rejected): let App go to sign-in.
+          // Another login took over: its own screens load its data.
+          if (!loginId()) nav.fail(b.err instanceof AuthError ? b.err : new AuthError('로그인이 필요해요.', 'NO_SESSION'));
+          return;
+        }
+        const prev = cachedFor(who);
+        now.fresh = !!a;
+        if (a) {
+          now.last = a.l;
+          setHero(a.l);
+        }
+        const list = b.r ? { items: b.r.items, pageInfo: b.r.pageInfo } : prev && prev.list;
+        if (b.r) {
+          now.list = list;
+          setData(list);
+        }
+        else if (!nav.fail(b.err)) setError(b.err.message);
+        cache = { who, last: a ? a.l : prev && prev.last, list };
       });
+    // Back from the player its last writes may still be on the way: the cached list
+    // stays up until they are done, then the server's view loads.
+    const reload = settled()
+      .then(() => now.alive && load())
+      .then(() => {
+        if (now.refreshing === reload) now.refreshing = null;
+      });
+    now.refreshing = reload;
     return () => {
-      alive = false;
+      now.alive = false;
     };
   }, []);
 
+  // 이어보기 opens the class's last lesson as Class101 has it after the player's writes:
+  // pressed before the reload lands it waits for it, and if that lookup failed it asks
+  // again. One press at a time, so a second OK can't open a second player.
+  function resume() {
+    const now = st.current;
+    if (now.resuming) return;
+    now.resuming = true;
+    const open = (l) => {
+      if (now.alive && l && l.lastLesson) nav.push('player', { klassId: l.id, lectureId: l.lastLesson.id });
+      else now.resuming = false;
+    };
+    if (!now.refreshing && now.fresh) return open(now.last);
+    toast('최근 강의를 확인하는 중…', 1500);
+    Promise.resolve(now.refreshing)
+      .then(() => (now.fresh ? now.last : lastClass()))
+      .then(open, () => {
+        now.resuming = false;
+        toast('최근 강의를 확인하지 못했어요. 다시 눌러 주세요.', 3000);
+      });
+  }
+
   // Focus once content exists: where we left off, else the hero, else the first card.
-  const ready = !!data;
+  const ready = !!data || !!hero;
   useEffect(() => {
     if (!ready) return;
     if (!focusKey(restoreFocus) && !focusKey('hero')) focusFirst('.card');
   }, [ready]);
 
+  // 더 보기 goes on from the list as it is after the reload (not the cached one it
+  // replaced), and only appends while that list is still the one on screen.
   function more() {
+    const now = st.current;
     setLoadingMore(true);
-    myClasses(data.pageInfo.endCursor)
-      .then((list) => {
-        cache = { ...data, items: data.items.concat(list.items), pageInfo: list.pageInfo };
-        setData(cache);
-        setLoadingMore(false);
+    const mineStill = () => now.alive && loginId() === who;
+    Promise.resolve(now.refreshing)
+      .then(() => {
+        const base = now.list;
+        if (!base || !base.pageInfo.hasNextPage) return null;
+        return myClasses(base.pageInfo.endCursor).then((page) => {
+          if (!mineStill() || now.list !== base) return;
+          const next = { items: base.items.concat(page.items), pageInfo: page.pageInfo };
+          now.list = next;
+          setData(next);
+          cache = { who, last: cache && cache.who === who ? cache.last : null, list: next };
+        });
       })
-      .catch((err) => {
-        setLoadingMore(false);
-        if (!nav.fail(err)) setError(err.message);
-      });
+      .then(
+        () => mineStill() && setLoadingMore(false),
+        (err) => {
+          if (!now.alive) return;
+          if (loginId() !== who) {
+            // Signed out under us (the refresh token was rejected): go to sign-in.
+            if (!loginId()) nav.fail(err instanceof AuthError ? err : new AuthError('로그인이 필요해요.', 'NO_SESSION'));
+            return;
+          }
+          setLoadingMore(false);
+          if (!nav.fail(err)) setError(err.message);
+        }
+      );
   }
 
   function logout() {
@@ -69,7 +140,7 @@ export default function Home({ restoreFocus }) {
     nav.reset('login');
   }
 
-  const last = data && data.last && data.last.lastLesson ? data.last : null;
+  const last = hero && hero.lastLesson ? hero : null;
 
   return (
     <div class="screen home">
@@ -99,7 +170,7 @@ export default function Home({ restoreFocus }) {
         <button
           class="hero focusable"
           data-fk="hero"
-          onClick={() => nav.push('player', { klassId: last.id, lectureId: last.lastLesson.id })}
+          onClick={resume}
         >
           <img src={last.coverImageURL} alt="" />
           <div class="hero__body">
