@@ -276,7 +276,8 @@ export default function Player({ klassId, lectureId, lectures }) {
     const onTime = () => {
       if (!v.paused && Date.now() - s.savedAt > SAVE_EVERY_MS) save(false);
     };
-    const onPause = () => save(false);
+    // Every pause saves; the queue skips a repeat of the position just confirmed.
+    const onPause = () => save(true);
     // Finishing is Class101's call, from watch time (see reportPlaytime).
     const onEnded = () => {
       const next = neighbour(1);

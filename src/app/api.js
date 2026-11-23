@@ -226,6 +226,11 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
     // saved just before, with no other lesson in between.
     if (lastSent && lastSent.key === key && lastSent.value === value && Date.now() - lastSent.at < 5000) return null;
     lastSent = null; // set again only once this one is confirmed
+    // Not confirmed: unless a newer position is waiting, hand this one to the next
+    // step for the lesson (a save merged into this one, or the next save).
+    const putBack = () => {
+      if (unsent[key] === undefined) unsent[key] = value;
+    };
     return gql(
       'TvSetLessonProgress',
       `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
@@ -237,8 +242,12 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
       (data) => {
         // Only a confirmed save counts (the site checks the answer the same way).
         if (data.setLessonProgress) lastSent = { key, value, at: Date.now() };
+        else putBack();
       },
-      () => null
+      () => {
+        putBack();
+        return null;
+      }
     );
   };
   saving = saving.then(step, step);
