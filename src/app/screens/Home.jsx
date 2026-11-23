@@ -24,46 +24,55 @@ export default function Home({ restoreFocus }) {
   const [error, setError] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
   const user = currentUser();
-  // The reload after the player's writes; until it lands the list on screen is cached.
-  const refreshing = useRef(null);
-  const alive = useRef(true);
+  // st.last: the last class as Class101 answered after the player's writes (fresh);
+  // refreshing: that reload, until it lands (the list on screen is cached till then).
+  const st = useRef({ alive: true, last: null, fresh: false, refreshing: null, resuming: false });
 
   useEffect(() => {
-    alive.current = true;
+    const now = st.current;
+    now.alive = true;
     const load = () =>
-      Promise.all([lastClass().catch(() => null), myClasses()])
-        .then(([last, list]) => {
-          if (!alive.current) return;
-          cache = { last, items: list.items, pageInfo: list.pageInfo };
+      Promise.all([lastClass().then((l) => ({ l }), () => null), myClasses().then((r) => ({ r }), (err) => ({ err }))]).then(([a, b]) => {
+        if (!now.alive) return;
+        now.fresh = !!a;
+        if (a) now.last = a.l;
+        if (b.r) {
+          cache = { last: a ? a.l : cache && cache.last, items: b.r.items, pageInfo: b.r.pageInfo };
           setData(cache);
-        })
-        .catch((err) => {
-          if (!alive.current || nav.fail(err)) return;
-          setError(err.message);
-        });
+        } else if (!nav.fail(b.err)) setError(b.err.message);
+      });
     // Back from the player its last writes may still be on the way: the cached list
     // stays up until they are done, then the server's view loads.
     const reload = settled()
-      .then(() => alive.current && load())
+      .then(() => now.alive && load())
       .then(() => {
-        if (refreshing.current === reload) refreshing.current = null;
+        if (now.refreshing === reload) now.refreshing = null;
       });
-    refreshing.current = reload;
+    now.refreshing = reload;
     return () => {
-      alive.current = false;
+      now.alive = false;
     };
   }, []);
 
-  // 이어보기 opens the server's last lesson. Pressed while the cached list is still up,
-  // it waits for the reload, so it can't reopen the lecture from before.
+  // 이어보기 opens the class's last lesson as Class101 has it after the player's writes:
+  // pressed before the reload lands it waits for it, and if that lookup failed it asks
+  // again. One press at a time, so a second OK can't open a second player.
   function resume() {
-    const go = () => {
-      const l = cache && cache.last;
-      if (alive.current && l && l.lastLesson) nav.push('player', { klassId: l.id, lectureId: l.lastLesson.id });
+    const now = st.current;
+    if (now.resuming) return;
+    now.resuming = true;
+    const open = (l) => {
+      if (now.alive && l && l.lastLesson) nav.push('player', { klassId: l.id, lectureId: l.lastLesson.id });
+      else now.resuming = false;
     };
-    if (!refreshing.current) return go();
+    if (!now.refreshing && now.fresh) return open(now.last);
     toast('최근 강의를 확인하는 중…', 1500);
-    refreshing.current.then(go);
+    Promise.resolve(now.refreshing)
+      .then(() => (now.fresh ? now.last : lastClass()))
+      .then(open, () => {
+        now.resuming = false;
+        toast('최근 강의를 확인하지 못했어요. 다시 눌러 주세요.', 3000);
+      });
   }
 
   // Focus once content exists: where we left off, else the hero, else the first card.

@@ -185,10 +185,24 @@ try {
   check('OK on next-up plays the next lecture', true);
   check('remembered speed carries to the next lecture', (await page.eval(videoState)).rate === 1.25);
 
-  // CH▼ goes back a lecture; CH▲ at the last open lecture says so.
+  // CH▼ goes back a lecture, while the server is slow with position saves (4 s each):
+  // l3's exit save must still reach it before l2's first one, since the lesson saved
+  // last is the class's last lesson.
+  mock.hold.TvSetLessonProgress = 4000;
+  const holdAt = Date.now();
+  await until(() => calls.timeline.some((e) => e.op === 'TvSetLessonProgress' && e.lessonId === 'l3' && e.at >= holdAt), 8000);
+  await sleep(1200); // l3 plays on, so its exit save has a position of its own
   await press(KEY.CH_DOWN, 'PageDown');
   await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture1/.test(v.currentSrc); })()`, 10000, 'previous lecture');
   check('CH▼ goes to the previous lecture', true);
+  await until(() => calls.timeline.some((e) => e.op === 'TvSetLessonProgress' && e.lessonId === 'l2' && e.at >= holdAt), 15000);
+  mock.hold.TvSetLessonProgress = 0;
+  const savesSince = calls.timeline.filter((e) => e.op === 'TvSetLessonProgress' && e.at >= holdAt).map((e) => e.lessonId);
+  check(
+    'a slow save of the lecture left behind still lands before the next lecture\'s',
+    savesSince.length >= 3 && savesSince.lastIndexOf('l3') < savesSince.indexOf('l2') && savesSince[savesSince.length - 1] === 'l2',
+    savesSince
+  );
 
   // Back to the class screen, focus where we were, then home.
   await press(KEY.BACK);
@@ -283,6 +297,17 @@ try {
   check('a category chip lists that category\'s PLUS classes', (await page.eval(`document.querySelectorAll('.search .card').length`)) === 2);
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.home .card').length === 6`, 5000, 'home again');
+
+  // A refresh that fails without the login being expired (503) keeps the session:
+  // 내 클래스 shows the error instead of the login screen.
+  mock.fail.refresh = true;
+  await page.eval(`(() => { window.__beforeReload = true; const s = JSON.parse(localStorage.getItem('c101:session')); s.expiresAt = 0; localStorage.setItem('c101:session', JSON.stringify(s)); location.reload(); })()`).catch(() => {});
+  await page.waitFor(`!window.__beforeReload && !!document.querySelector('.home .error')`, 8000, 'refresh error on home').catch(() => {});
+  check(
+    'a failed token refresh shows an error and keeps the login',
+    await page.eval(`!document.querySelector('.login') && /갱신하지 못했어요/.test((document.querySelector('.home .error') || {}).textContent || '') && !!localStorage.getItem('c101:session')`)
+  );
+  mock.fail.refresh = false;
 
   // Expired ID token is refreshed transparently.
   // The marker dies with the old page, so the wait can't pass before the reload.

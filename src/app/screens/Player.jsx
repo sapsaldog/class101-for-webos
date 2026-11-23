@@ -80,6 +80,9 @@ export default function Player({ klassId, lectureId, lectures }) {
     tracks: [],
     cues: [],
     mode: 'native',
+    // The account this player was opened with: its saves and reports belong to it,
+    // even the save on unmount after a login hand-over has switched accounts.
+    who: signedInAs(),
     time: () => 0,
     dur: () => NaN,
     seek: () => {},
@@ -121,7 +124,7 @@ export default function Player({ klassId, lectureId, lectures }) {
     showCurtain(true, '강의를 불러오는 중…');
     Promise.all([
       fetchLecture(lectureId),
-      // After this lesson's queued saves, so a quick reopen resumes from the newest one.
+      // After this lesson's queued position saves, so a quick reopen resumes from the newest one.
       lessonSaved(lectureId)
         .then(() => fetchLesson(lectureId))
         .catch(() => null),
@@ -157,7 +160,7 @@ export default function Player({ klassId, lectureId, lectures }) {
     if (!force && Math.abs(t - s.savedPos) < 3) return;
     s.savedPos = t;
     s.savedAt = Date.now();
-    saveProgress(lectureId, t).catch(() => {});
+    saveProgress(lectureId, t, s.who).catch(() => {});
   }
 
   // ---- playback plumbing ----
@@ -324,8 +327,8 @@ export default function Player({ klassId, lectureId, lectures }) {
     const klass = (info.lecture.klass && info.lecture.klass._id) || klassId;
     if (!klass) return;
     let alive = true;
-    const who = signedInAs(); // reports from this player belong to this account
-    openLecture(klass, lectureId);
+    const who = s.who;
+    openLecture(klass, lectureId, who);
 
     // View session, like the site: VIEW_SESSION_DELAY s after opening and after the
     // playing state changes ('playing' / 'pause'), one request at a time, with the id
@@ -405,7 +408,7 @@ export default function Player({ klassId, lectureId, lectures }) {
       last = t;
       if (played >= PLAYTIME_EVERY) {
         played %= PLAYTIME_EVERY;
-        reportPlaytime(lectureId, withVideoId(), t, PLAYTIME_EVERY).catch(() => {});
+        reportPlaytime(lectureId, withVideoId(), t, PLAYTIME_EVERY, who).catch(() => {});
       }
     }, 500);
 

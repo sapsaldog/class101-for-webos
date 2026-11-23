@@ -68,9 +68,12 @@ export default function App() {
       pop: () => setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)),
       replace: (name, props) => setStack((s) => s.slice(0, -1).concat(entry(name, props))),
       reset: (name, props) => setStack([entry(name, props)]),
-      // Any screen can hand us an error; an expired login sends everyone back to the login screen.
+      // Any screen can hand us an error. A login that is really gone (refresh token
+      // rejected, or none) sends everyone back to the login screen. A network failure
+      // while refreshing keeps the session for the next try: social-login accounts
+      // would otherwise need the computer hand-over again.
       fail: (err) => {
-        if (err instanceof AuthError) {
+        if (err instanceof AuthError && (err.code === 'SESSION_EXPIRED' || err.code === 'NO_SESSION')) {
           signOut();
           setStack([entry('login', { message: err.message })]);
           return true;

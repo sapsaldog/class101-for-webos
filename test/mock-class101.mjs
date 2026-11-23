@@ -18,7 +18,9 @@ export async function startMock({ videoFor, data, serveOpts } = {}) {
 // timeline: { op, lessonId, at, doneAt } per GraphQL request (doneAt: when answered).
 const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], views: [], enter: [], sessions: [], playtime: [], timeline: [] };
 // hold[operationName] = ms delays that operation's answer (to test waiting for writes).
+// fail.refresh = true makes token refresh answer 503 (a failure that isn't expiry).
 const hold = {};
+const fail = { refresh: false };
 let base = '';
 
 const LECTURES = [
@@ -189,6 +191,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === '/token') {
     calls.refresh++;
+    if (fail.refresh) return json(503, { error: { message: 'UNAVAILABLE' } });
     const body = await readJson(req);
     if (/refresh_token=ref-1/.test(body)) return json(200, { id_token: `tok-r${calls.refresh}`, refresh_token: 'ref-1', expires_in: '3600' });
     return json(400, { error: { message: 'INVALID_REFRESH_TOKEN' } });
@@ -241,5 +244,5 @@ const server = http.createServer(async (req, res) => {
 
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  return { base, calls, hold, close: () => server.close() };
+  return { base, calls, hold, fail, close: () => server.close() };
 }

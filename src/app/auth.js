@@ -82,13 +82,18 @@ export async function signIn(email, password) {
 }
 
 let refreshing = null;
+let refreshingFor = null;
 
 async function refresh() {
+  const started = session; // the login this refresh belongs to
   const { res, data } = await postJson(
     `${endpoint('refresh')}?key=${FIREBASE_API_KEY}`,
-    `grant_type=refresh_token&refresh_token=${encodeURIComponent(session.refreshToken)}`,
+    `grant_type=refresh_token&refresh_token=${encodeURIComponent(started.refreshToken)}`,
     'application/x-www-form-urlencoded'
   );
+  // Signed out, or another login took over, while this was on the way: its tokens
+  // must not land in that session.
+  if (session !== started) throw new AuthError('로그인이 바뀌었어요. 다시 시도해 주세요.', 'SESSION_CHANGED');
   if (!res.ok) {
     if (res.status === 400 || res.status === 401 || res.status === 403) {
       save(null);
@@ -97,9 +102,9 @@ async function refresh() {
     throw new AuthError(`로그인 정보를 갱신하지 못했어요. (${res.status})`, 'REFRESH_FAILED');
   }
   save({
-    ...session,
+    ...started,
     idToken: data.id_token,
-    refreshToken: data.refresh_token || session.refreshToken,
+    refreshToken: data.refresh_token || started.refreshToken,
     expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
   });
   return session.idToken;
@@ -108,17 +113,20 @@ async function refresh() {
 export function idToken({ force = false } = {}) {
   if (!session) return Promise.reject(new AuthError('로그인이 필요해요.', 'NO_SESSION'));
   if (!force && session.idToken && Date.now() < session.expiresAt - 60000) return Promise.resolve(session.idToken);
-  if (!refreshing) {
-    refreshing = refresh().then(
+  // One refresh at a time per login; a new login doesn't wait on the old one's.
+  if (!refreshing || refreshingFor !== session) {
+    refreshingFor = session;
+    const p = refresh().then(
       (token) => {
-        refreshing = null;
+        if (refreshing === p) refreshing = null;
         return token;
       },
       (err) => {
-        refreshing = null;
+        if (refreshing === p) refreshing = null;
         throw err;
       }
     );
+    refreshing = p;
   }
   return refreshing;
 }

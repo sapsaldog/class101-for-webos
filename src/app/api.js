@@ -201,21 +201,25 @@ export function writing() {
   return pending.length > 0;
 }
 
-// Position saves for one lesson go out one at a time, newest position wins: two
-// requests in flight could reach the server in the other order. They also move the
-// class's last lesson on Class101 (see classLastLesson).
-const saves = {};
-export function saveProgress(lessonId, progressSeconds) {
-  const who = account();
+// Position saves go out one at a time, in the order they were made, across lessons:
+// each also moves the class's last lesson on Class101 (see classLastLesson), so a
+// lecture left behind must not land after the one opened next. Saves of one lesson
+// still waiting are merged into its newest position. `who` is the account the player
+// was opened with; the save is dropped if another one is signed in by then.
+let saving = Promise.resolve();
+const unsent = {}; // "<who> <lessonId>" → newest position not sent yet
+const lastSent = {}; // "<who> <lessonId>" → { value, at }
+const lessonStep = {}; // "<who> <lessonId>" → its newest queued step
+export function saveProgress(lessonId, progressSeconds, who = account()) {
   const key = `${who} ${lessonId}`;
-  const q = saves[key] || (saves[key] = { chain: Promise.resolve(), next: null, saved: null, savedAt: 0 });
-  q.next = Math.max(0, Math.round(progressSeconds));
-  q.chain = q.chain.then(() => {
-    const value = q.next;
-    if (value === null) return null; // already sent by an earlier step
-    q.next = null;
+  unsent[key] = Math.max(0, Math.round(progressSeconds));
+  const step = () => {
+    const value = unsent[key];
+    if (value === undefined) return null; // merged into an earlier step
+    delete unsent[key];
     // Leaving saves twice (Back, then unmount): skip the same position saved just now.
-    if (value === q.saved && Date.now() - q.savedAt < 5000) return null;
+    const prev = lastSent[key];
+    if (prev && prev.value === value && Date.now() - prev.at < 5000) return null;
     return gql(
       'TvSetLessonProgress',
       `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
@@ -225,21 +229,22 @@ export function saveProgress(lessonId, progressSeconds) {
       { who }
     ).then(
       () => {
-        q.saved = value;
-        q.savedAt = Date.now();
+        lastSent[key] = { value, at: Date.now() };
       },
       () => null
     );
-  });
-  return write(q.chain);
+  };
+  saving = saving.then(step, step);
+  lessonStep[key] = saving;
+  return write(saving);
 }
 
-// Resolves when the lesson's queued position saves are done. The player waits for it
-// before reading the resume position, so reopening a lecture quickly can't resume
-// (and then save) from an older position.
+// Resolves when the lesson's queued position saves are done (and so every save queued
+// before them). The player waits for it before reading the resume position, so
+// reopening a lecture quickly can't resume (and then save) from an older position.
 export function lessonSaved(lessonId) {
-  const q = saves[`${account()} ${lessonId}`];
-  return q ? q.chain.then(() => undefined) : Promise.resolve();
+  const p = lessonStep[`${account()} ${lessonId}`];
+  return p ? p.then(() => undefined) : Promise.resolve();
 }
 
 // Class tickets, cached once found (a class can get a ticket later).
@@ -264,8 +269,7 @@ function klassTicket(klassId, who) {
 // class's last-watched time, not its last lesson. Visits go out one after another in
 // opening order, and finish even after the player closes.
 let visits = Promise.resolve();
-export function openLecture(klassId, lectureId) {
-  const who = account();
+export function openLecture(klassId, lectureId, who = account()) {
   const run = () =>
     Promise.all([
       gql(
@@ -348,8 +352,8 @@ async function rest(path, payload, token) {
 // lectureV2ById.completed to notice). The app leaves it to Class101 too.
 // videoId may be a promise while the player is still looking it up; the interval is
 // tracked as a write from the moment it was earned.
-export function reportPlaytime(lessonId, videoId, playbackLocation, interval) {
-  const who = account(); // whoever earned it; dropped if another account signs in meanwhile
+export function reportPlaytime(lessonId, videoId, playbackLocation, interval, who = account()) {
+  // `who` earned it; it is dropped if another account is signed in by the time it goes.
   const path = `/v1/playtime-tracking/lessons/${encodeURIComponent(lessonId)}/play`;
   const earned = { playbackLocation, interval, timestamp: new Date().toISOString() };
   return write(

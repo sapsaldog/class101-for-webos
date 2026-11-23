@@ -11,7 +11,8 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
   const [lastId, setLastId] = useState(lastLessonId);
   const [error, setError] = useState('');
   // Newest answers, for 이어보기 pressed while the reload after the player is pending.
-  const now = useRef({ klass: null, lastId: lastLessonId, alive: true, refreshing: null });
+  // lastFresh: Class101 answered the last-lesson lookup in the newest load.
+  const now = useRef({ klass: null, lastId: lastLessonId, lastFresh: false, alive: true, refreshing: null, resuming: false });
 
   useEffect(() => {
     const st = now.current;
@@ -19,14 +20,16 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
     let latest = 0;
     const load = () => {
       const n = ++latest; // an older answer must not replace a newer one
-      return Promise.all([curriculum(klassId), classLastLesson(klassId).catch(() => null)])
+      return Promise.all([curriculum(klassId), classLastLesson(klassId).then((id) => ({ id }), () => null)])
         .then(([k, last]) => {
           if (!st.alive || n !== latest) return;
           st.klass = k;
           setKlass(k);
+          st.lastFresh = !!last;
           if (last) {
-            st.lastId = last; // what Class101 has now, not what Home knew
-            setLastId(last);
+            // What Class101 has now, not what Home knew; none means no 이어보기.
+            st.lastId = last.id;
+            setLastId(last.id);
           }
         })
         .catch((err) => {
@@ -62,16 +65,26 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
     nav.push('player', { klassId, lectureId: lec._id, lectures: flattenLectures(now.current.klass || klass) });
   }
 
-  // Waits for the reload after the player, so it can't reopen the lecture from before.
+  // 이어보기 opens the class's last lesson as Class101 has it after the player's writes:
+  // pressed before the reload lands it waits for it, and if that lookup failed it asks
+  // again. One press at a time, so a second OK can't open a second player.
   function resume() {
-    const go = () => {
-      const st = now.current;
-      const lec = st.klass && flattenLectures(st.klass).find((l) => l._id === st.lastId);
+    const st = now.current;
+    if (st.resuming) return;
+    st.resuming = true;
+    const open = (id) => {
+      const lec = st.klass && flattenLectures(st.klass).find((l) => l._id === id);
       if (st.alive && lec) play(lec);
+      else st.resuming = false;
     };
-    if (!now.current.refreshing) return go();
+    if (!st.refreshing && st.lastFresh) return open(st.lastId);
     toast('최근 강의를 확인하는 중…', 1500);
-    now.current.refreshing.then(go);
+    Promise.resolve(st.refreshing)
+      .then(() => (st.lastFresh ? st.lastId : classLastLesson(klassId)))
+      .then(open, () => {
+        st.resuming = false;
+        toast('최근 강의를 확인하지 못했어요. 다시 눌러 주세요.', 3000);
+      });
   }
 
   let n = 0;
