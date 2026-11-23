@@ -223,11 +223,11 @@ try {
   const savesBefore = calls.progress.length;
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.lec').length === 4`, 8000, 'back to class again');
-  await until(() => calls.progress.slice(savesBefore).filter(([id]) => id === 'l3').length >= 2, 3000);
+  await until(() => calls.progress.slice(savesBefore).filter(([id]) => id === 'l3').length >= 2, 6000); // tried again after 2 s
   mock.fail.saveFalseFor = null;
   const exitPair = calls.progress.slice(savesBefore).filter(([id]) => id === 'l3');
   check(
-    'a save the server turns down isn\'t counted: the same position is sent again',
+    'a save the server turns down isn\'t counted: the same position is tried again',
     exitPair.length >= 2 && exitPair[0][1] === exitPair[1][1],
     exitPair
   );
@@ -284,9 +284,10 @@ try {
   check('Back from the player shows the lesson saved last on the class card (l2)', /기초 다지기/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
   check('…with the hero focused again', (await active()) === 'hero', await active());
 
-  // The resume lookup (TvLesson) fails once: the player asks again before playing and
-  // resumes at the saved 30 s, instead of starting at 0 and saving that over it.
-  mock.fail.lessonErrors = { l2: 1 };
+  // The resume lookup (TvLesson) answers once without its video data (an error on that
+  // field): the player asks again before playing and resumes at the saved 30 s, instead
+  // of starting at 0 and saving that over it.
+  mock.fail.lessonPartial = { l2: 1 };
   await press(KEY.ENTER, 'Enter');
   await page.waitFor(`(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 25; })()`, 12000, 'resume after a retried lookup').catch(() => {});
   check('a failed resume lookup is asked again, and playback resumes at the saved position', await page.eval(`(() => { const v = document.querySelector('video'); return !!v && v.currentTime >= 29; })()`));

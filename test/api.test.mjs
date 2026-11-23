@@ -12,6 +12,11 @@ if (!globalThis.navigator) Object.defineProperty(globalThis, 'navigator', { valu
 store.set('c101:endpoints', JSON.stringify({ graphql: 'http://fake/graphql', api: 'http://fake/api' }));
 store.set('c101:session', JSON.stringify({ sid: 's1', email: 'a@example.com', idToken: 'tok-1', refreshToken: 'ref-1', expiresAt: Date.now() + 3600000 }));
 
+// The save retries wait 2/5/15 s; shrink waits of 1-19 s to 1 ms here, so retries run
+// at once. (The 20 s request deadline and 0 ms timers stay as they are.)
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms >= 1000 && ms < 20000 ? 1 : ms, ...args);
+
 const log = []; // requests in the order the fake server gets them
 const held = []; // replies waiting for release()
 let holding = false;
@@ -102,7 +107,7 @@ api.saveProgress('C', 9);
 api.saveProgress('C', 9);
 await flush();
 await drain();
-check('a save turned down goes out again with the save merged into it', saves() === 'A@30 C@9 C@9', saves());
+check('a save turned down is tried again in its place, though Back and unmount merged into it', saves() === 'A@30 C@9 C@9', saves());
 
 // A network failure puts the position back the same way.
 reset();
@@ -111,18 +116,50 @@ failNext.E = 1;
 api.saveProgress('E', 4);
 api.saveProgress('E', 4);
 await flush();
-check('a save that failed on the network goes out again with the next step', saves() === 'E@4 E@4', saves());
+check('a save that failed on the network is tried again', saves() === 'E@4 E@4', saves());
 
-// A failed save with nothing after it is tried again a little later (2 s first).
+// A retry keeps its place in line: a later lesson's save waits for its outcome.
 reset();
 holding = false;
-failNext.F = 1;
-api.saveProgress('F', 8);
+failNext.G = 1;
+api.saveProgress('G', 1);
+api.saveProgress('H', 2);
 await flush();
-check('a lone failed save goes out once at first', saves() === 'F@8', saves());
-await new Promise((r) => setTimeout(r, 2300));
+check('a retried save keeps its place: the next lesson\'s save goes out after it', saves() === 'G@1 G@1 H@2', saves());
+
+// lessonSaved() waits for the retried outcome, not just the first try.
+reset();
+holding = true;
+failNext.J = 1;
+api.saveProgress('J', 3);
+let jSaved = false;
+api.lessonSaved('J').then(() => (jSaved = true));
 await flush();
-check('…and is retried a little later', saves() === 'F@8 F@8', saves());
+check('lessonSaved waits while a failed save is being tried again', jSaved === false && saves() === 'J@3 J@3', saves());
+await drain();
+check('…and resolves once the retry is answered', jSaved === true);
+
+// A newer position for the lesson stops the old one's retries; its own step sends it.
+reset();
+turnDown.K = 1;
+api.saveProgress('K', 5);
+await flush();
+api.saveProgress('K', 6);
+await flush();
+await drain();
+check('a newer position stops the old one\'s retries', saves() === 'K@5 K@6', saves());
+
+// Each position gets its own tries: one that used them all doesn't spend the next one's.
+reset();
+holding = false;
+failNext.L = 4;
+api.saveProgress('L', 1);
+await flush();
+check('a position is tried 4 times in all, then dropped', saves() === 'L@1 L@1 L@1 L@1', saves());
+failNext.L = 1;
+api.saveProgress('L', 2);
+await flush();
+check('…and a newer position still gets its own tries', saves() === 'L@1 L@1 L@1 L@1 L@2 L@2', saves());
 
 // lessonSaved() waits for that lesson's queued saves.
 reset();

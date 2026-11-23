@@ -128,10 +128,16 @@ export default function Player({ klassId, lectureId, lectures }) {
     // save that over the real position, so it is asked again, and the player doesn't
     // start if it keeps failing (the site doesn't render its player without it either).
     const lessonWithRetry = (n = 1) =>
-      fetchLesson(lectureId).catch((err) => {
-        if (!alive || n >= LESSON_TRIES || err instanceof AuthError) throw err;
-        return new Promise((r) => setTimeout(r, 1000 * n)).then(() => lessonWithRetry(n + 1));
-      });
+      fetchLesson(lectureId)
+        .then((les) => {
+          // No video data (a missing or failed field) is no answer: it would read as 0.
+          if (!les || !les.video) throw new Error('이어볼 위치가 오지 않았어요.');
+          return les;
+        })
+        .catch((err) => {
+          if (!alive || n >= LESSON_TRIES || err instanceof AuthError) throw err;
+          return new Promise((r) => setTimeout(r, 1000 * n)).then(() => lessonWithRetry(n + 1));
+        });
     Promise.all([
       fetchLecture(lectureId),
       // After this lesson's queued position saves, so a quick reopen resumes from the newest one.

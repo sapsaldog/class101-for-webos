@@ -25,7 +25,8 @@ const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], view
 // state.morePages = true: the class list has a second page.
 const hold = {};
 // fail.lessonErrors[lessonId] = n: that lesson's next n TvLesson lookups fail.
-const fail = { refresh: false, saveFalseFor: null, expireOnPage2: false, lessonErrors: {} };
+// fail.lessonPartial[lessonId] = n: they answer the lesson with video null and an error on it.
+const fail = { refresh: false, saveFalseFor: null, expireOnPage2: false, lessonErrors: {}, lessonPartial: {} };
 const state = { morePages: false };
 let base = '';
 
@@ -112,6 +113,13 @@ function graphql(body, auth) {
       };
     }
     case 'TvLesson':
+      if (fail.lessonPartial[v.lessonId] > 0) {
+        fail.lessonPartial[v.lessonId]--;
+        return {
+          data: { lesson: { id: v.lessonId, title: 'x', video: null, captions: [] } },
+          errors: [{ message: 'video resolver timed out', path: ['lesson', 'video'], extensions: { code: 'INTERNAL_SERVER_ERROR' } }],
+        };
+      }
       if (fail.lessonErrors[v.lessonId] > 0) {
         fail.lessonErrors[v.lessonId]--;
         return { errors: [{ message: 'Gateway timeout', extensions: { code: 'INTERNAL_SERVER_ERROR' } }], data: null };
