@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { myClasses, lastClass, settled } from '../api.js';
+import { myClasses, lastClass, settled, recentLecture } from '../api.js';
 import { currentUser, signOut } from '../auth.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { toggleHelp } from '../overlay.js';
@@ -27,18 +27,20 @@ export default function Home({ restoreFocus }) {
 
   useEffect(() => {
     let alive = true;
-    // Back from the player its last saves may still be on the way.
-    settled()
-      .then(() => Promise.all([lastClass().catch(() => null), myClasses()]))
-      .then(([last, list]) => {
-        if (!alive) return;
-        cache = { last, items: list.items, pageInfo: list.pageInfo };
-        setData(cache);
-      })
-      .catch((err) => {
-        if (!alive || nav.fail(err)) return;
-        setError(err.message);
-      });
+    const load = () =>
+      Promise.all([lastClass().catch(() => null), myClasses()])
+        .then(([last, list]) => {
+          if (!alive) return;
+          cache = { last, items: list.items, pageInfo: list.pageInfo };
+          setData(cache);
+        })
+        .catch((err) => {
+          if (!alive || nav.fail(err)) return;
+          setError(err.message);
+        });
+    // Back from the player its last saves may still be on the way: wait for them (at
+    // most 4 s), and if some were slower, load again once they are done.
+    settled(4000).then((done) => load().then(() => (done || !alive ? null : settled().then(() => alive && load()))));
     return () => {
       alive = false;
     };
@@ -101,7 +103,7 @@ export default function Home({ restoreFocus }) {
         <button
           class="hero focusable"
           data-fk="hero"
-          onClick={() => nav.push('player', { klassId: last.id, lectureId: last.lastLesson.id })}
+          onClick={() => nav.push('player', { klassId: last.id, lectureId: recentLecture(last.id) || last.lastLesson.id })}
         >
           <img src={last.coverImageURL} alt="" />
           <div class="hero__body">

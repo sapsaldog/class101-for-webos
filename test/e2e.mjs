@@ -45,7 +45,7 @@ async function until(fn, ms) {
 // ---------------------------------------------------------------- mock Class101
 
 const mock = await startMock();
-const { base, calls } = mock;
+const { base, calls } = mock; // mock.hold delays answers per operation
 const server = { close: mock.close };
 
 // ---------------------------------------------------------------- run
@@ -135,15 +135,16 @@ try {
     pt.lessonId === 'l2' && pt.body.videoId === 'v-l2' && pt.body.interval === 10 && pt.body.playbackLocation >= 39,
     pt
   );
-  check('…with the login token, a timestamp and a request id', /^Bearer tok-/.test(pt.auth || '') && !isNaN(Date.parse(pt.body.timestamp)) && /^[0-9a-f-]{36}$/.test(pt.requestId || ''), pt);
+  check('…with the login token, a timestamp and a request id', pt.authOk === true && !isNaN(Date.parse(pt.body.timestamp)) && /^[0-9a-f-]{36}$/.test(pt.requestId || ''), pt);
   check('the view session opens 10 s after playback starts (no sessionId yet)', calls.sessions.length === 1 && calls.sessions[0][0] === '(none)' && calls.sessions[0][1] === 'l2' && calls.sessions[0][2] === true, calls.sessions);
 
   await sleep(600);
   await shot('04-player');
 
+  const beforeSeek = (await page.eval(videoState)).t;
   await press(KEY.RIGHT, 'ArrowRight');
   vs = await page.eval(videoState);
-  check('▶ seeks +10 s', vs.t >= 39, vs);
+  check('▶ seeks +10 s', vs.t - beforeSeek >= 9 && vs.t - beforeSeek < 12, { before: beforeSeek, after: vs.t });
   await press(KEY.ENTER, 'Enter');
   check('OK pauses', (await page.eval(videoState)).paused);
   await press(KEY.ENTER, 'Enter');
@@ -171,7 +172,7 @@ try {
   // End of lecture → next-up countdown → next lecture.
   await page.eval(`(() => { const v = document.querySelector('video'); v.currentTime = v.duration - 1; })()`);
   await page.waitFor(`!!document.querySelector('.next-up')`, 8000, 'next-up');
-  check('ending a lecture marks it complete', calls.complete.includes('l2'), calls.complete);
+  check('ending a lecture leaves finishing it to Class101 (no completeLectureV3, as on the site)', calls.complete.length === 0, calls.complete);
   check('next-up card shows the next lecture', /실전 연습/.test(await page.eval(`document.querySelector('.next-up').textContent`)));
   await shot('06-next-up');
   await press(KEY.ENTER, 'Enter');
@@ -189,27 +190,51 @@ try {
   await page.waitFor(`document.querySelectorAll('.lec').length === 4`, 8000, 'back to class');
   check('Back leaves the player for the class screen', true);
   check('leaving the player saved progress again', calls.progress.length >= 2, calls.progress.length);
+
+  // Another lecture from the list, then Back: the class screen's 이어보기 follows it
+  // (Home only knew the class's last lesson from before).
+  await page.eval(`document.querySelector('[data-fk="lec-l3"]').click()`);
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'l3 from the list');
+  await press(KEY.BACK);
+  await page.waitFor(`document.querySelectorAll('.lec').length === 4`, 8000, 'back to class again');
+  check(
+    'the class screen\'s 이어보기 follows the lecture just watched',
+    await page.eval(`!!document.querySelector('.lec.current[data-fk="lec-l3"]') && /실전 연습/.test(document.querySelector('.klass__side').textContent)`)
+  );
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.card').length === 6`, 8000, 'back home');
   check('Back again returns to 내 클래스 with the class card focused', (await active()) === 'class-k1', await active());
   await page.waitFor(`document.querySelector('[data-fk="class-k1"] .progress i').style.width === '50%'`, 5000, 'k1 progress').catch(() => {});
   check(
-    '내 클래스 shows the progress made (2 of 4 lectures done)',
+    '내 클래스 shows the progress the server now reports (l2 got watch time: 2 of 4 done)',
     (await page.eval(`document.querySelector('[data-fk="class-k1"] .progress i').style.width`)) === '50%',
     await page.eval(`document.querySelector('[data-fk="class-k1"] .progress i').style.width`)
   );
 
-  // 이어보기 → next lecture → straight back: 내 클래스 shows it as the class's latest.
+  // 이어보기 opens the lecture last opened on this TV (l3, from the list above). CH▼ to
+  // l2, then straight back: 내 클래스 shows l2 as the class's latest.
   await press(KEY.UP, 'ArrowUp');
   await press(KEY.ENTER, 'Enter');
-  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 25; })()`, 10000, 'hero playback');
-  await press(KEY.CH_UP, 'PageUp');
-  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'next lecture from hero');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'hero playback').catch(() => {});
+  check('이어보기 opens the lecture last opened on this TV', await page.eval(`(() => { const v = document.querySelector('video'); return !!v && /lecture2/.test(v.currentSrc); })()`));
+  await press(KEY.CH_DOWN, 'PageDown');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture1/.test(v.currentSrc) && !v.paused; })()`, 10000, 'previous lecture from hero');
+  await press(KEY.RIGHT, 'ArrowRight'); // a new position, so leaving has something to save
+  await sleep(300);
+  // The server answers the player's last position saves only after 1.5 s each.
+  mock.hold.TvSetLessonProgress = 1500;
+  const backAt = Date.now();
   await press(KEY.BACK);
-  await page.waitFor(`document.querySelectorAll('.card').length === 6 && /실전 연습/.test(document.querySelector('[data-fk="class-k1"] .card__meta').textContent)`, 8000, 'latest lecture on home').catch(() => {});
-  check('Back from the player shows the lecture just opened on the class card', /실전 연습/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
-  const lastSave = calls.ops.lastIndexOf('TvSetLessonProgress');
-  check('내 클래스 reloads only after the player\'s last save', lastSave !== -1 && calls.ops.lastIndexOf('TvTakingClasses') > lastSave, calls.ops.slice(-6));
+  await page.waitFor(`document.querySelectorAll('.card').length === 6 && /기초 다지기/.test(document.querySelector('[data-fk="class-k1"] .card__meta').textContent)`, 10000, 'latest lecture on home').catch(() => {});
+  mock.hold.TvSetLessonProgress = 0;
+  check('Back from the player shows the lecture just opened on the class card', /기초 다지기/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
+  const exitSaves = calls.timeline.filter((e) => e.op === 'TvSetLessonProgress' && e.at >= backAt - 100);
+  const reload = calls.timeline.find((e) => e.op === 'TvTakingClasses' && e.at >= backAt);
+  check(
+    '내 클래스 reloads only after the server answered the player\'s exit save',
+    exitSaves.length > 0 && exitSaves.every((e) => e.lessonId === 'l2' && e.doneAt) && !!reload && reload.at >= Math.max(...exitSaves.map((e) => e.doneAt)),
+    { exitSaves: exitSaves.map((e) => [e.lessonId, e.at - backAt, e.doneAt - backAt]), reloadAt: reload && reload.at - backAt }
+  );
   check('…with the hero focused again', (await active()) === 'hero', await active());
   await press(KEY.DOWN, 'ArrowDown');
 

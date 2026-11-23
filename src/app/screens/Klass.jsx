@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { curriculum, flattenLectures, settled } from '../api.js';
+import { curriculum, flattenLectures, settled, recentLecture } from '../api.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { duration } from '../format.js';
 
@@ -11,19 +11,24 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
 
   useEffect(() => {
     let alive = true;
-    settled()
-      .then(() => curriculum(klassId))
-      .then((k) => alive && setKlass(k))
-      .catch((err) => {
-        if (alive && !nav.fail(err)) setError(err.message);
-      });
+    const load = () =>
+      curriculum(klassId)
+        .then((k) => alive && setKlass(k))
+        .catch((err) => {
+          if (alive && !nav.fail(err)) setError(err.message);
+        });
+    // Back from the player: wait for its last writes (at most 4 s), and load again if
+    // some were slower, so ✓ marks are current.
+    settled(4000).then((done) => load().then(() => (done || !alive ? null : settled().then(() => alive && load()))));
     return () => {
       alive = false;
     };
   }, [klassId]);
 
   const lectures = klass ? flattenLectures(klass) : [];
-  const current = lectures.find((l) => l._id === lastLessonId);
+  // The lecture opened last on this TV beats the one Home knew when it opened us.
+  const lastId = recentLecture(klassId) || lastLessonId;
+  const current = lectures.find((l) => l._id === lastId);
   const firstOpen = lectures.find((l) => l.canAccess !== false);
 
   useEffect(() => {
@@ -64,7 +69,7 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
               {(ch.lectures || []).map((l) => {
                 n++;
                 const locked = l.canAccess === false;
-                const cls = ['lec', 'focusable', l.completed ? 'done' : '', l._id === lastLessonId ? 'current' : '', locked ? 'locked' : ''].join(' ');
+                const cls = ['lec', 'focusable', l.completed ? 'done' : '', l._id === lastId ? 'current' : '', locked ? 'locked' : ''].join(' ');
                 return (
                   <button key={l._id} class={cls} data-fk={`lec-${l._id}`} onClick={() => (locked ? null : play(l))}>
                     <span class="lec__idx">{n}</span>

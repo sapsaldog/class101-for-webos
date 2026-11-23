@@ -1,27 +1,40 @@
 // Class101 GraphQL gateway. Documents mirror the ones class101.net sends (minus its
 // client-only @merge/@relayPagination directives), so the gateway accepts them.
 import { endpoint } from './config.js';
-import { idToken, AuthError } from './auth.js';
+import { idToken, currentUser, AuthError } from './auth.js';
 import { hasLuna, lunaCall, lunaSubscribe } from './luna.js';
 
 const SERVICE = 'luna://com.sapsaldog.class101.service';
-let serviceOk = hasLuna() && !localStorage.getItem('c101:endpoints');
+// On the TV, requests go through our JS service. Tests and desktop browsers (no
+// Luna, or mock endpoints) use plain fetch.
+const onTv = hasLuna() && !localStorage.getItem('c101:endpoints');
+let relayDownUntil = 0; // the Luna bus failed (service missing?): GraphQL uses fetch until then
 
 // Keep the relay service warm while the app is open.
 export function warmUp() {
-  if (serviceOk) lunaSubscribe(`${SERVICE}/keepAlive`, {});
+  if (onTv) lunaSubscribe(`${SERVICE}/keepAlive`, {});
 }
 
-// On the TV, GraphQL goes through our JS service: the web engine forces
-// Accept-Language to the TV menu language and Class101 then answers in English.
-// Elsewhere (tests, or if the service is missing) plain fetch.
+function parse(text) {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    return null;
+  }
+}
+
+// GraphQL goes through the service on the TV: the web engine forces Accept-Language
+// to the TV menu language and Class101 then answers in English. If the bus itself
+// fails (the service is not installed, or it timed out), use fetch for a minute.
+// A network error reported by the service is just a network error.
 async function post(body, token) {
-  if (serviceOk) {
+  if (onTv && Date.now() >= relayDownUntil) {
     try {
       const res = await lunaCall(`${SERVICE}/gql`, { body, token, language: 'ko', userAgent: navigator.userAgent });
-      return { status: res.status, json: JSON.parse(res.body) };
+      return { status: res.status, json: parse(res.body) };
     } catch (e) {
-      serviceOk = false; // fall back for the rest of the session
+      if (e.response && e.response.relayError) throw e;
+      relayDownUntil = Date.now() + 60000;
     }
   }
   const res = await fetch(endpoint('graphql'), {
@@ -155,68 +168,98 @@ function write(promise) {
   return promise;
 }
 
-export function settled(maxMs = 4000) {
-  if (!pending.length) return Promise.resolve();
-  const all = Promise.all(pending.map((p) => p.catch(() => {})));
-  return Promise.race([all, new Promise((r) => setTimeout(r, maxMs))]);
+// Resolves true once every write in flight has finished, or false when maxMs passes
+// first (then the caller can show what it has and load again on settled()).
+export function settled(maxMs) {
+  if (!pending.length) return Promise.resolve(true);
+  const all = Promise.all(pending.map((p) => p.catch(() => {}))).then(() => true);
+  return maxMs ? Promise.race([all, new Promise((r) => setTimeout(() => r(false), maxMs))]) : all;
 }
 
+// Per-account memory for this app session, keyed "<email> <id>".
+const accountKey = (id) => `${(currentUser() || {}).email || ''} ${id}`;
+
+// Position saves for one lesson go out one at a time, newest position wins: two
+// requests in flight could reach the server in the other order.
+const saves = {};
 export function saveProgress(lessonId, progressSeconds) {
-  return write(
-    gql(
+  const key = accountKey(lessonId);
+  const q = saves[key] || (saves[key] = { chain: Promise.resolve(), next: null, saved: null, savedAt: 0 });
+  q.next = Math.max(0, Math.round(progressSeconds));
+  q.chain = q.chain.then(() => {
+    const value = q.next;
+    if (value === null) return null; // already sent by an earlier step
+    q.next = null;
+    // Leaving saves twice (Back, then unmount): skip the same position saved just now.
+    if (value === q.saved && Date.now() - q.savedAt < 5000) return null;
+    return gql(
       'TvSetLessonProgress',
       `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
         setLessonProgress(lessonID: $lessonId, progressSeconds: $progressSeconds)
       }`,
-      { lessonId, progressSeconds: Math.max(0, Math.round(progressSeconds)) }
-    )
-  );
+      { lessonId, progressSeconds: value }
+    ).then(
+      () => {
+        q.saved = value;
+        q.savedAt = Date.now();
+      },
+      () => null
+    );
+  });
+  return write(q.chain);
 }
 
-export function completeLecture(lectureId) {
-  return write(
-    gql(
-      'TvCompleteLecture',
-      `mutation TvCompleteLecture($lectureId: String!) { completeLecture: completeLectureV3(lectureId: $lectureId) { _id completed } }`,
-      { lectureId }
-    )
-  );
+// The lecture last opened on this TV, per class. The class screen and the home hero
+// use it until the server's own last lesson catches up.
+const opened = {};
+export function recentLecture(klassId) {
+  return opened[accountKey(klassId)] || null;
 }
 
-// Opening a lecture: the site sends both when its lecture page opens (the user's view
-// history, and the class ticket's last-watched time).
-export function viewLecture(klassId, lectureId) {
-  return write(
-    gql(
-      'TvViewHistory',
-      `mutation TvViewHistory($klassId: String!, $lectureId: String!) { updateUserViewHistory(klassId: $klassId, missionId: $lectureId) }`,
-      { klassId, lectureId }
-    )
-  );
-}
-
-export function enterLecture(klassId, lectureId) {
-  return write(
-    gql(
+const tickets = {};
+function klassTicket(klassId) {
+  const key = accountKey(klassId);
+  if (!tickets[key]) {
+    tickets[key] = gql(
       'TvKlassTicket',
       `query TvKlassTicket($klassId: String!) { klassTicket: getKlassTicketByKlassId(klassId: $klassId) { _id } }`,
       { klassId }
-    ).then((data) => {
-      const ticket = data.klassTicket && data.klassTicket._id;
-      if (!ticket) return null; // the site skips it too
-      return gql(
-        'TvEnterLecture',
-        `mutation TvEnterLecture($klassTicketId: String!, $missionId: String) { enterLecture(klassTicketId: $klassTicketId, missionId: $missionId) { lastWatchedAt } }`,
-        { klassTicketId: ticket, missionId: lectureId }
-      );
-    })
-  );
+    ).then((data) => (data.klassTicket && data.klassTicket._id) || null);
+    tickets[key].catch(() => delete tickets[key]);
+  }
+  return tickets[key];
+}
+
+// Opening a lecture: the site sends both when its lecture page opens (the user's view
+// history, and enterLecture with the class ticket). Visits go out in opening order,
+// and a visit whose lecture is no longer open (isOpen() false) is dropped.
+let visits = Promise.resolve();
+export function openLecture(klassId, lectureId, isOpen) {
+  opened[accountKey(klassId)] = lectureId;
+  const run = async () => {
+    if (!isOpen()) return;
+    await gql(
+      'TvViewHistory',
+      `mutation TvViewHistory($klassId: String!, $lectureId: String!) { updateUserViewHistory(klassId: $klassId, missionId: $lectureId) }`,
+      { klassId, lectureId }
+    );
+    const ticket = await klassTicket(klassId);
+    if (!ticket || !isOpen()) return; // the site skips enterLecture without a ticket too
+    await gql(
+      'TvEnterLecture',
+      `mutation TvEnterLecture($klassTicketId: String!, $missionId: String) { enterLecture(klassTicketId: $klassTicketId, missionId: $missionId) { lastWatchedAt } }`,
+      { klassTicketId: ticket, missionId: lectureId }
+    );
+  };
+  const p = visits.then(run, run);
+  visits = p.catch(() => {});
+  return write(p);
 }
 
 // Lecture view session: the site sends this 10 s after the page opens and 10 s after
-// each play/pause, passing back the session id it got the last time. Without one,
-// leave sessionId out: an explicit null fails on the gateway ("Cannot return null for
-// non-nullable field Mutation.updateLectureViewHistory").
+// playback starts or pauses, passing back the session id it got the last time. Without
+// one, leave sessionId out: an explicit null fails on the gateway ("Cannot return null
+// for non-nullable field Mutation.updateLectureViewHistory").
 export function lectureViewHistory(sessionId, klassId, lectureId, videoPlayed) {
   const variables = { klassId, lectureId, videoPlayed: !!videoPlayed };
   if (sessionId) variables.sessionId = sessionId;
@@ -240,18 +283,15 @@ function requestId() {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }
 
-// Class101's REST API. On the TV this goes through the service as well: the API's
-// CORS filter rejects the "Origin: null" of a file:// app ("Invalid CORS request").
+// Class101's REST API. On the TV this always goes through the service: the API's CORS
+// filter rejects the "Origin: null" of a file:// app ("Invalid CORS request"), so a
+// direct fetch there cannot work.
 async function rest(path, payload, token) {
   const body = JSON.stringify(payload);
   const id = requestId();
-  if (serviceOk) {
-    try {
-      const res = await lunaCall(`${SERVICE}/rest`, { path, body, token, requestId: id, userAgent: navigator.userAgent });
-      return res.status;
-    } catch (e) {
-      /* plain fetch below */
-    }
+  if (onTv) {
+    const res = await lunaCall(`${SERVICE}/rest`, { path, body, token, requestId: id, userAgent: navigator.userAgent });
+    return res.status;
   }
   const res = await fetch(endpoint('api') + path, {
     method: 'POST',
@@ -262,8 +302,9 @@ async function rest(path, payload, token) {
 }
 
 // Watch time. The site posts it for every 10 s of lecture played (counted on the
-// lecture's own clock, so every 5 s at 2x). It never calls completeLectureV3 for video
-// lectures: Class101 finishes those on its side, and the site polls for it.
+// lecture's own clock, so every 5 s at 2x) and does not resend failed ones. It never
+// calls completeLectureV3 for video lectures: Class101 finishes those from watch time
+// (the site polls lectureV2ById.completed to notice). The app leaves it to Class101 too.
 export function reportPlaytime(lessonId, videoId, playbackLocation, interval) {
   const path = `/v1/playtime-tracking/lessons/${encodeURIComponent(lessonId)}/play`;
   const payload = { playbackLocation, interval, timestamp: new Date().toISOString(), videoId };

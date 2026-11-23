@@ -106,7 +106,7 @@ try {
   // Jump near the end and let it finish → completion + next-up.
   await page.key(57, { key: '9', code: 'Digit9' });
   await page.waitFor(`!!document.querySelector('.next-up')`, 20000, 'next-up after end').catch(() => {});
-  check('finishing a lecture in speed mode completes it and offers the next one', !!(await page.eval(`!!document.querySelector('.next-up')`)) && calls.complete.length > 0, calls.complete);
+  check('finishing a lecture in speed mode offers the next one (finishing it is Class101\'s call)', !!(await page.eval(`!!document.querySelector('.next-up')`)) && calls.complete.length === 0, calls.complete);
   check('progress saved in content seconds', calls.progress.some(([id, t]) => t > 30), calls.progress.slice(-3));
   check('no page exceptions', errors.length === 0, errors.slice(0, 5));
 } catch (e) {

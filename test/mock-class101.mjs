@@ -14,8 +14,11 @@ const media = path.join(root, 'test/fixtures/media');
 export async function startMock({ videoFor, data, serveOpts } = {}) {
 
 // views: [klassId, lectureId] (updateUserViewHistory), enter: [ticketId, lectureId],
-// sessions: [sessionId, lectureId, videoPlayed], playtime: { lessonId, auth, body }.
-const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], views: [], enter: [], sessions: [], playtime: [] };
+// sessions: [sessionId, lectureId, videoPlayed], playtime: { lessonId, authOk, requestId, body },
+// timeline: { op, lessonId, at, doneAt } per GraphQL request (doneAt: when answered).
+const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], views: [], enter: [], sessions: [], playtime: [], timeline: [] };
+// hold[operationName] = ms delays that operation's answer (to test waiting for writes).
+const hold = {};
 let base = '';
 
 const LECTURES = [
@@ -186,12 +189,29 @@ const server = http.createServer(async (req, res) => {
     if (/refresh_token=ref-1/.test(body)) return json(200, { id_token: `tok-r${calls.refresh}`, refresh_token: 'ref-1', expires_in: '3600' });
     return json(400, { error: { message: 'INVALID_REFRESH_TOKEN' } });
   }
-  if (url.pathname === '/graphql') return json(200, graphql(JSON.parse(await readJson(req)), req.headers.authorization));
+  if (url.pathname === '/graphql') {
+    const body = JSON.parse(await readJson(req));
+    const entry = { op: body.operationName, lessonId: (body.variables || {}).lessonId, at: Date.now(), doneAt: 0 };
+    calls.timeline.push(entry);
+    const answer = graphql(body, req.headers.authorization);
+    const send = () => {
+      entry.doneAt = Date.now();
+      json(200, answer);
+    };
+    return hold[body.operationName] ? setTimeout(send, hold[body.operationName]) : send();
+  }
   const play = /^\/api\/v1\/playtime-tracking\/lessons\/([^/]+)\/play$/.exec(url.pathname);
   if (play && req.method === 'POST') {
     const auth = req.headers.authorization || '';
-    calls.playtime.push({ lessonId: decodeURIComponent(play[1]), auth, requestId: req.headers['x-request-id'], body: JSON.parse((await readJson(req)) || '{}') });
-    return /^Bearer tok-/.test(auth) ? json(200, { result: 'SUCCESS' }) : json(401, { result: 'FAIL', errorCode: 'http/unauthorized' });
+    const authOk = /^Bearer tok-/.test(auth);
+    const lessonId = decodeURIComponent(play[1]);
+    calls.playtime.push({ lessonId, authOk, requestId: req.headers['x-request-id'], body: JSON.parse((await readJson(req)) || '{}') });
+    if (!authOk) return json(401, { result: 'FAIL', errorCode: 'http/unauthorized' });
+    // Class101 finishes video lectures from watch time. The mock's stand-in rule: a
+    // lecture counts as finished once any watch time for it arrives.
+    const l = LECTURES.find((x) => x._id === lessonId);
+    if (l) l.completed = true;
+    return res.writeHead(200).end();
   }
   if (data && data.serve) {
     const handled = data.serve(url, res, serveOpts);
@@ -217,5 +237,5 @@ const server = http.createServer(async (req, res) => {
 
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  return { base, calls, close: () => server.close() };
+  return { base, calls, hold, close: () => server.close() };
 }

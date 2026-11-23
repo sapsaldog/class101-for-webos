@@ -23,8 +23,11 @@ export function lunaCall(uri, params, { timeout = 25000 } = {}) {
       } catch (e) {
         return reject(new Error('bad luna response'));
       }
-      if (res.returnValue === false) reject(new Error(res.errorText || 'luna call failed'));
-      else resolve(res);
+      if (res.returnValue === false) {
+        const err = new Error(res.errorText || 'luna call failed');
+        err.response = res; // e.g. our service's { relayError: true } for network errors
+        reject(err);
+      } else resolve(res);
     };
     bridge.call(uri, JSON.stringify(params || {}));
   });

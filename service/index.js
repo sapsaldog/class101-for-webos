@@ -15,6 +15,18 @@ var keepAlive = null;
 
 // The only REST call the app makes.
 var REST_PATH = /^\/v1\/playtime-tracking\/lessons\/[A-Za-z0-9_-]{1,64}\/play$/;
+var DEFAULT_UA = 'Mozilla/5.0 (Web0S; Linux/SmartTV) WebAppManager class101-for-webos';
+
+// Header values come from the caller. Take only values of the expected shape: Node
+// throws on characters such as CR/LF in a header while building the request.
+var PRINTABLE = /^[\x20-\x7e]{1,512}$/;
+var TOKEN = /^[A-Za-z0-9._-]{1,4096}$/;
+var LANGUAGE = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/;
+var REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
+function headerValue(value, pattern) {
+  var v = value === undefined || value === null ? '' : String(value);
+  return pattern.test(v) ? v : null;
+}
 
 service.register('ping', function (message) {
   message.respond({ returnValue: true, node: process.version });
@@ -22,7 +34,7 @@ service.register('ping', function (message) {
 
 service.register('gql', function (message) {
   var p = message.payload || {};
-  relay(message, 'cdn-production-gateway.class101.net', '/graphql', { 'accept-language': p.language || 'ko' });
+  relay(message, 'cdn-production-gateway.class101.net', '/graphql', { 'accept-language': headerValue(p.language, LANGUAGE) || 'ko' });
 });
 
 service.register('rest', function (message) {
@@ -32,43 +44,60 @@ service.register('rest', function (message) {
     message.respond({ returnValue: false, errorText: 'path not allowed' });
     return;
   }
-  relay(message, 'api.class101.net', '/api' + path, p.requestId ? { 'x-request-id': String(p.requestId).slice(0, 64) } : {});
+  var id = headerValue(p.requestId, REQUEST_ID);
+  relay(message, 'api.class101.net', '/api' + path, id ? { 'x-request-id': id } : {});
 });
 
-// POST payload.body (JSON) to host+path with the app's token; answer with status and body.
+// POST payload.body (JSON) to host+path with the app's token and answer with the
+// status and body. Failures answer { returnValue: false, relayError: true }, so the
+// app can tell them from a Luna bus error (service missing).
 function relay(message, host, path, extra) {
   var p = message.payload || {};
+  var answered = false;
+  function answer(reply) {
+    if (answered) return;
+    answered = true;
+    message.respond(reply);
+  }
+  function fail(e) {
+    answer({ returnValue: false, relayError: true, errorText: String((e && e.message) || e) });
+  }
   var body = String(p.body || '');
   var headers = {
     'content-type': 'application/json',
     accept: 'application/json',
     // The gateway's WAF answers requests without a User-Agent with a
     // "Human Verification" page (HTTP 405); send the TV's own UA.
-    'user-agent': p.userAgent || 'Mozilla/5.0 (Web0S; Linux/SmartTV) WebAppManager class101-for-webos',
+    'user-agent': headerValue(p.userAgent, PRINTABLE) || DEFAULT_UA,
     'content-length': Buffer.byteLength(body),
   };
   Object.keys(extra).forEach(function (k) {
     headers[k] = extra[k];
   });
-  if (p.token) headers.authorization = 'Bearer ' + p.token;
-  var req = https.request(
-    { method: 'POST', host: host, path: path, headers: headers },
-    function (res) {
+  if (p.token !== undefined && p.token !== null && p.token !== '') {
+    var token = headerValue(p.token, TOKEN);
+    if (!token) return fail('bad token');
+    headers.authorization = 'Bearer ' + token;
+  }
+  var req;
+  try {
+    req = https.request({ method: 'POST', host: host, path: path, headers: headers }, function (res) {
       var chunks = [];
       res.on('data', function (c) {
         chunks.push(c);
       });
       res.on('end', function () {
-        message.respond({ returnValue: true, status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
+        answer({ returnValue: true, status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
       });
-    }
-  );
+      res.on('error', fail);
+    });
+  } catch (e) {
+    return fail(e);
+  }
   req.setTimeout(20000, function () {
     req.abort();
   });
-  req.on('error', function (e) {
-    message.respond({ returnValue: false, errorText: String((e && e.message) || e) });
-  });
+  req.on('error', fail);
   req.end(body);
 }
 

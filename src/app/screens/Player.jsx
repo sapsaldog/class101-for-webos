@@ -9,9 +9,7 @@ import {
   curriculum,
   flattenLectures,
   saveProgress,
-  completeLecture,
-  viewLecture,
-  enterLecture,
+  openLecture,
   lectureViewHistory,
   reportPlaytime,
 } from '../api.js';
@@ -271,8 +269,8 @@ export default function Player({ klassId, lectureId, lectures }) {
       if (!v.paused && Date.now() - s.savedAt > SAVE_EVERY_MS) save(false);
     };
     const onPause = () => save(false);
+    // Finishing is Class101's call, from watch time (see reportPlaytime).
     const onEnded = () => {
-      completeLecture(lectureId).catch(() => {});
       const next = neighbour(1);
       if (next) setNextUp({ lecture: next, seconds: NEXT_UP_SECONDS });
       else {
@@ -287,8 +285,12 @@ export default function Player({ klassId, lectureId, lectures }) {
       const code = v.error ? v.error.code : 0;
       setMessage(`영상을 재생하지 못했어요. (오류 ${code})`);
     };
+    // Going to the background: pause, and save where we are even if already paused
+    // (a seek while paused has no pause event to save it).
     const onHidden = () => {
-      if (document.hidden && !v.paused) v.pause();
+      if (!document.hidden) return;
+      if (!v.paused) v.pause();
+      save(true);
     };
     v.addEventListener('loadedmetadata', onMeta);
     v.addEventListener('playing', onPlaying);
@@ -317,61 +319,98 @@ export default function Player({ klassId, lectureId, lectures }) {
     const klass = (info.lecture.klass && info.lecture.klass._id) || klassId;
     if (!klass) return;
     let alive = true;
-    viewLecture(klass, lectureId).catch(() => {});
-    enterLecture(klass, lectureId).catch(() => {});
+    const isOpen = () => alive;
+    openLecture(klass, lectureId, isOpen).catch(() => {});
 
-    // View session: sent VIEW_SESSION_DELAY s after opening and after each play or
-    // pause, with the id from the last answer; on errors the wait doubles.
+    // View session, like the site: VIEW_SESSION_DELAY s after opening and after the
+    // playing state changes ('playing' / 'pause'), one request at a time, with the id
+    // from the last answer; on errors the wait doubles.
     let session = null;
+    let playing = false;
     let wait = VIEW_SESSION_DELAY;
     let timer = 0;
-    const beat = () => {
+    let sending = Promise.resolve();
+    const schedule = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        lectureViewHistory(session, klass, lectureId, !v.paused).then(
-          (id) => {
-            session = id;
-            wait = VIEW_SESSION_DELAY;
-          },
-          () => {
-            if (!alive) return;
-            wait = Math.min(wait * 2, 600);
-            beat();
-          }
-        );
+        sending = sending.then(() => {
+          if (!alive) return null;
+          return lectureViewHistory(session, klass, lectureId, playing).then(
+            (id) => {
+              session = id;
+              wait = VIEW_SESSION_DELAY;
+            },
+            () => {
+              if (!alive) return;
+              wait = Math.min(wait * 2, 600);
+              schedule();
+            }
+          );
+        });
       }, wait * 1000);
     };
-    beat();
-    v.addEventListener('play', beat);
-    v.addEventListener('pause', beat);
+    const onPlaying = () => {
+      if (playing) return;
+      playing = true;
+      schedule();
+    };
+    const onPaused = () => {
+      if (!playing) return;
+      playing = false;
+      schedule();
+    };
+    schedule();
+    v.addEventListener('playing', onPlaying);
+    v.addEventListener('pause', onPaused);
 
-    // Watch time on the lecture's clock (content seconds), like the site: steps over
-    // 3 s are seeks and don't count; a remainder under PLAYTIME_EVERY is dropped.
-    const videoId = info.lesson && info.lesson.video && info.lesson.video.id;
+    // Watch time on the lecture's clock (content seconds), like the site: the sampling
+    // baseline restarts on seeks, pauses and buffering, and steps over 3 s don't count;
+    // a remainder under PLAYTIME_EVERY is dropped. If the lesson lookup failed, the
+    // video id is looked up again when a report is due.
+    let videoId = info.lesson && info.lesson.video && info.lesson.video.id;
+    let lookup = null;
+    const withVideoId = () => {
+      if (videoId) return Promise.resolve(videoId);
+      if (!lookup) {
+        lookup = fetchLesson(lectureId)
+          .then((l) => (videoId = (l && l.video && l.video.id) || null), () => null)
+          .then((id) => {
+            lookup = null;
+            return id;
+          });
+      }
+      return lookup;
+    };
     let last = null;
     let played = 0;
-    const tick =
-      videoId &&
-      setInterval(() => {
-        const t = s.time();
-        if (v.paused || v.seeking || v.ended || !isFinite(t)) {
-          last = null;
-          return;
-        }
-        if (last !== null && t >= last && t - last <= 3) played += t - last;
-        last = t;
-        if (played >= PLAYTIME_EVERY) {
-          played %= PLAYTIME_EVERY;
-          reportPlaytime(lectureId, videoId, t, PLAYTIME_EVERY).catch(() => {});
-        }
-      }, 500);
+    const restart = () => {
+      last = null;
+    };
+    const breaks = ['seeking', 'seeked', 'waiting', 'pause', 'emptied'];
+    breaks.forEach((name) => v.addEventListener(name, restart));
+    const tick = setInterval(() => {
+      const t = s.time();
+      if (v.paused || v.seeking || v.ended || !isFinite(t)) {
+        last = null;
+        return;
+      }
+      if (last !== null && t >= last && t - last <= 3) played += t - last;
+      last = t;
+      if (played >= PLAYTIME_EVERY) {
+        played %= PLAYTIME_EVERY;
+        withVideoId()
+          .then((id) => (id && alive ? reportPlaytime(lectureId, id, t, PLAYTIME_EVERY) : null))
+          .catch(() => {});
+      }
+    }, 500);
 
     return () => {
       alive = false;
       clearTimeout(timer);
       clearInterval(tick);
-      v.removeEventListener('play', beat);
-      v.removeEventListener('pause', beat);
+      v.removeEventListener('playing', onPlaying);
+      v.removeEventListener('pause', onPaused);
+      breaks.forEach((name) => v.removeEventListener(name, restart));
     };
   }, [info]);
 
