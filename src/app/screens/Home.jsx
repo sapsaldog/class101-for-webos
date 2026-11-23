@@ -1,9 +1,9 @@
-import { useContext, useEffect, useState } from 'preact/hooks';
+import { useContext, useEffect, useRef, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { myClasses, lastClass, settled, recentLecture } from '../api.js';
+import { myClasses, lastClass, settled } from '../api.js';
 import { currentUser, signOut } from '../auth.js';
 import { focusKey, focusFirst } from '../focus.js';
-import { toggleHelp } from '../overlay.js';
+import { toggleHelp, toast } from '../overlay.js';
 import { percent } from '../format.js';
 
 // Kept across visits so coming back from a class shows the list instantly,
@@ -24,27 +24,47 @@ export default function Home({ restoreFocus }) {
   const [error, setError] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
   const user = currentUser();
+  // The reload after the player's writes; until it lands the list on screen is cached.
+  const refreshing = useRef(null);
+  const alive = useRef(true);
 
   useEffect(() => {
-    let alive = true;
+    alive.current = true;
     const load = () =>
       Promise.all([lastClass().catch(() => null), myClasses()])
         .then(([last, list]) => {
-          if (!alive) return;
+          if (!alive.current) return;
           cache = { last, items: list.items, pageInfo: list.pageInfo };
           setData(cache);
         })
         .catch((err) => {
-          if (!alive || nav.fail(err)) return;
+          if (!alive.current || nav.fail(err)) return;
           setError(err.message);
         });
     // Back from the player its last writes may still be on the way: the cached list
     // stays up until they are done, then the server's view loads.
-    settled().then(() => alive && load());
+    const reload = settled()
+      .then(() => alive.current && load())
+      .then(() => {
+        if (refreshing.current === reload) refreshing.current = null;
+      });
+    refreshing.current = reload;
     return () => {
-      alive = false;
+      alive.current = false;
     };
   }, []);
+
+  // 이어보기 opens the server's last lesson. Pressed while the cached list is still up,
+  // it waits for the reload, so it can't reopen the lecture from before.
+  function resume() {
+    const go = () => {
+      const l = cache && cache.last;
+      if (alive.current && l && l.lastLesson) nav.push('player', { klassId: l.id, lectureId: l.lastLesson.id });
+    };
+    if (!refreshing.current) return go();
+    toast('최근 강의를 확인하는 중…', 1500);
+    refreshing.current.then(go);
+  }
 
   // Focus once content exists: where we left off, else the hero, else the first card.
   const ready = !!data;
@@ -103,7 +123,7 @@ export default function Home({ restoreFocus }) {
         <button
           class="hero focusable"
           data-fk="hero"
-          onClick={() => nav.push('player', { klassId: last.id, lectureId: recentLecture(last.id) || last.lastLesson.id })}
+          onClick={resume}
         >
           <img src={last.coverImageURL} alt="" />
           <div class="hero__body">

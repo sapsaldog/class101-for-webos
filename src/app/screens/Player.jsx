@@ -13,6 +13,7 @@ import {
   openLecture,
   lectureViewHistory,
   reportPlaytime,
+  signedInAs,
 } from '../api.js';
 import { KEY, arrowOf, colorOf, digitOf, isBack } from '../keys.js';
 import {
@@ -323,6 +324,7 @@ export default function Player({ klassId, lectureId, lectures }) {
     const klass = (info.lecture.klass && info.lecture.klass._id) || klassId;
     if (!klass) return;
     let alive = true;
+    const who = signedInAs(); // reports from this player belong to this account
     openLecture(klass, lectureId);
 
     // View session, like the site: VIEW_SESSION_DELAY s after opening and after the
@@ -339,7 +341,7 @@ export default function Player({ klassId, lectureId, lectures }) {
         const wasPlaying = playing; // the state this report is about, not the one at sending time
         sending = sending.then(() => {
           if (!alive) return null;
-          return lectureViewHistory(session, klass, lectureId, wasPlaying).then(
+          return lectureViewHistory(session, klass, lectureId, wasPlaying, who).then(
             (id) => {
               session = id;
               wait = VIEW_SESSION_DELAY;

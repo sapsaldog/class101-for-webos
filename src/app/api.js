@@ -3,12 +3,16 @@
 import { endpoint } from './config.js';
 import { idToken, currentUser, AuthError } from './auth.js';
 import { hasLuna, lunaCall, lunaSubscribe } from './luna.js';
+import { request } from './net.js';
 
 const SERVICE = 'luna://com.sapsaldog.class101.service';
 // On the TV, requests go through our JS service. Tests and desktop browsers (no
 // Luna, or mock endpoints) use plain fetch.
 const onTv = hasLuna() && !localStorage.getItem('c101:endpoints');
-let relayDownUntil = 0; // the Luna bus failed (service missing?): GraphQL uses fetch until then
+let relayDownUntil = 0; // the Luna bus refused a read (service missing?): GraphQL uses fetch until then
+
+// The signed-in account, to keep queued writes from going out under another one.
+const account = () => (currentUser() || {}).email || '';
 
 // Keep the relay service warm while the app is open.
 export function warmUp() {
@@ -24,27 +28,26 @@ function parse(text) {
 }
 
 // GraphQL goes through the service on the TV: the web engine forces Accept-Language
-// to the TV menu language and Class101 then answers in English. Only a definite "no"
-// from the Luna bus (the service is not installed) switches to fetch, for a minute.
-// After a timeout, a garbled reply, or a network error the service reports, the
-// request may have gone out, so it is not sent again another way: a mutation could
-// apply twice.
-async function post(body, token) {
+// to the TV menu language and Class101 then answers in English. A write is never
+// sent a second way: whether a failed try reached Class101 is unknown (Luna can even
+// answer "Message status unknown."), and a mutation could apply twice. A read may
+// fall back to fetch for a minute when the bus refuses it (service missing).
+async function post(body, token, isWrite) {
   if (onTv && Date.now() >= relayDownUntil) {
     try {
       const res = await lunaCall(`${SERVICE}/gql`, { body, token, language: 'ko', userAgent: navigator.userAgent });
       return { status: res.status, json: parse(res.body) };
     } catch (e) {
-      if (e.uncertain || (e.response && e.response.relayError)) throw e;
+      if (isWrite || e.uncertain || (e.response && e.response.relayError)) throw e;
       relayDownUntil = Date.now() + 60000;
     }
   }
-  const res = await fetch(endpoint('graphql'), {
+  const res = await request(endpoint('graphql'), {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'accept-language': 'ko', authorization: `Bearer ${token}` },
     body,
   });
-  return { status: res.status, json: await res.json().catch(() => null) };
+  return { status: res.status, json: parse(res.text) };
 }
 
 export class ApiError extends Error {
@@ -54,11 +57,18 @@ export class ApiError extends Error {
   }
 }
 
-async function gql(operationName, query, variables, retried) {
+// opts.who: the account a queued write belongs to. It is not sent (nor retried with a
+// refreshed token) once another account is signed in.
+async function gql(operationName, query, variables, opts = {}) {
+  const { who, retried } = opts;
+  const mine = () => who === undefined || account() === who;
+  const changed = () => new ApiError('다른 계정으로 바뀌어 보내지 않았어요.', 'ACCOUNT_CHANGED');
+  if (!mine()) throw changed();
   const token = await idToken({ force: !!retried });
+  if (!mine()) throw changed();
   let res;
   try {
-    res = await post(JSON.stringify({ operationName, query, variables: variables || {} }), token);
+    res = await post(JSON.stringify({ operationName, query, variables: variables || {} }), token, /^\s*mutation\b/.test(query));
   } catch (e) {
     throw new ApiError('인터넷에 연결할 수 없어요.', 'NETWORK');
   }
@@ -66,7 +76,7 @@ async function gql(operationName, query, variables, retried) {
   if (!json) throw new ApiError(`서버 응답을 읽지 못했어요. (${res.status})`, 'BAD_RESPONSE');
   const errors = json.errors || [];
   const unauth = errors.some((e) => e.extensions && e.extensions.code === 'UNAUTHENTICATED') || res.status === 401;
-  if (unauth && !retried) return gql(operationName, query, variables, true);
+  if (unauth && !retried) return gql(operationName, query, variables, { who, retried: true });
   if (unauth) throw new AuthError('로그인이 만료됐어요. 다시 로그인해 주세요.', 'SESSION_EXPIRED');
   const data = json.data || {};
   const empty = Object.keys(data).every((k) => data[k] == null);
@@ -105,6 +115,17 @@ export async function lastClass() {
     `query TvLastClass { lastClass { id title coverImageURL progressRatio lastLesson { id } creator { nickName } } }`
   );
   return data.lastClass || null;
+}
+
+// The class's last lesson as Class101 has it: the lesson whose position was saved last
+// (setLessonProgress moves it; opening a lecture does not). The site asks the same way.
+export async function classLastLesson(klassId) {
+  const data = await gql(
+    'TvClassLastLesson',
+    `query TvClassLastLesson($classId: ID!) { class(classId: $classId, marked: true) { id lastLesson { id } } }`,
+    { classId: klassId }
+  );
+  return (data.class && data.class.lastLesson && data.class.lastLesson.id) || null;
 }
 
 export async function curriculum(klassId) {
@@ -170,8 +191,8 @@ function write(promise) {
   return promise;
 }
 
-// Resolves once every write in flight now has finished. Each is bounded by its
-// transport's timeout (Luna 25 s on the TV).
+// Resolves once every write in flight now has finished. Each is bounded: Luna times
+// out after 25 s, and fetch (net.request) after 20 s.
 export function settled() {
   return Promise.all(pending.map((p) => p.catch(() => {}))).then(() => undefined);
 }
@@ -180,13 +201,9 @@ export function writing() {
   return pending.length > 0;
 }
 
-// Per-account memory for this app session, keyed "<email> <id>".
-const account = () => (currentUser() || {}).email || '';
-const accountKey = (id) => `${account()} ${id}`;
-
 // Position saves for one lesson go out one at a time, newest position wins: two
-// requests in flight could reach the server in the other order. A save still queued
-// when the account changes is dropped.
+// requests in flight could reach the server in the other order. They also move the
+// class's last lesson on Class101 (see classLastLesson).
 const saves = {};
 export function saveProgress(lessonId, progressSeconds) {
   const who = account();
@@ -197,7 +214,6 @@ export function saveProgress(lessonId, progressSeconds) {
     const value = q.next;
     if (value === null) return null; // already sent by an earlier step
     q.next = null;
-    if (account() !== who) return null;
     // Leaving saves twice (Back, then unmount): skip the same position saved just now.
     if (value === q.saved && Date.now() - q.savedAt < 5000) return null;
     return gql(
@@ -205,7 +221,8 @@ export function saveProgress(lessonId, progressSeconds) {
       `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
         setLessonProgress(lessonID: $lessonId, progressSeconds: $progressSeconds)
       }`,
-      { lessonId, progressSeconds: value }
+      { lessonId, progressSeconds: value },
+      { who }
     ).then(
       () => {
         q.saved = value;
@@ -221,29 +238,20 @@ export function saveProgress(lessonId, progressSeconds) {
 // before reading the resume position, so reopening a lecture quickly can't resume
 // (and then save) from an older position.
 export function lessonSaved(lessonId) {
-  const q = saves[accountKey(lessonId)];
+  const q = saves[`${account()} ${lessonId}`];
   return q ? q.chain.then(() => undefined) : Promise.resolve();
-}
-
-// The lecture last opened on this TV, per class, for a few minutes: enough for the
-// class screen's 이어보기 and the home hero to follow it while the server's own last
-// lesson catches up, and short enough not to hide watching on another device.
-const OPENED_FOR_MS = 5 * 60 * 1000;
-const opened = {};
-export function recentLecture(klassId) {
-  const o = opened[accountKey(klassId)];
-  return o && Date.now() - o.at < OPENED_FOR_MS ? o.lectureId : null;
 }
 
 // Class tickets, cached once found (a class can get a ticket later).
 const tickets = {};
-function klassTicket(klassId) {
-  const key = accountKey(klassId);
+function klassTicket(klassId, who) {
+  const key = `${who} ${klassId}`;
   if (tickets[key]) return Promise.resolve(tickets[key]);
   return gql(
     'TvKlassTicket',
     `query TvKlassTicket($klassId: String!) { klassTicket: getKlassTicketByKlassId(klassId: $klassId) { _id } }`,
-    { klassId }
+    { klassId },
+    { who }
   ).then((data) => {
     const id = (data.klassTicket && data.klassTicket._id) || null;
     if (id) tickets[key] = id;
@@ -252,31 +260,33 @@ function klassTicket(klassId) {
 }
 
 // Opening a lecture: the site sends both when its lecture page opens, each on its own
-// (the user's view history, and enterLecture with the class ticket). Here visits go
-// out in opening order and finish even after the player closes; an older visit skips
-// enterLecture once a newer one exists, so a slow ticket lookup can't make it the
-// latest.
+// (the user's view history, and enterLecture with the class ticket); they move the
+// class's last-watched time, not its last lesson. Visits go out one after another in
+// opening order, and finish even after the player closes.
 let visits = Promise.resolve();
-let lastVisit = 0;
 export function openLecture(klassId, lectureId) {
-  const seq = ++lastVisit;
   const who = account();
-  opened[accountKey(klassId)] = { lectureId, at: Date.now() };
-  const run = async () => {
-    if (account() !== who) return;
-    await gql(
-      'TvViewHistory',
-      `mutation TvViewHistory($klassId: String!, $lectureId: String!) { updateUserViewHistory(klassId: $klassId, missionId: $lectureId) }`,
-      { klassId, lectureId }
-    ).catch(() => null);
-    const ticket = await klassTicket(klassId).catch(() => null);
-    if (!ticket || seq !== lastVisit || account() !== who) return; // the site skips it without a ticket too
-    await gql(
-      'TvEnterLecture',
-      `mutation TvEnterLecture($klassTicketId: String!, $missionId: String) { enterLecture(klassTicketId: $klassTicketId, missionId: $missionId) { lastWatchedAt } }`,
-      { klassTicketId: ticket, missionId: lectureId }
-    ).catch(() => null);
-  };
+  const run = () =>
+    Promise.all([
+      gql(
+        'TvViewHistory',
+        `mutation TvViewHistory($klassId: String!, $lectureId: String!) { updateUserViewHistory(klassId: $klassId, missionId: $lectureId) }`,
+        { klassId, lectureId },
+        { who }
+      ).catch(() => null),
+      klassTicket(klassId, who)
+        .then((ticket) =>
+          ticket // the site skips enterLecture without a ticket too
+            ? gql(
+                'TvEnterLecture',
+                `mutation TvEnterLecture($klassTicketId: String!, $missionId: String) { enterLecture(klassTicketId: $klassTicketId, missionId: $missionId) { lastWatchedAt } }`,
+                { klassTicketId: ticket, missionId: lectureId },
+                { who }
+              )
+            : null
+        )
+        .catch(() => null),
+    ]);
   visits = visits.then(run, run);
   return write(visits);
 }
@@ -285,7 +295,7 @@ export function openLecture(klassId, lectureId) {
 // playback starts or pauses, passing back the session id it got the last time. Without
 // one, leave sessionId out: an explicit null fails on the gateway ("Cannot return null
 // for non-nullable field Mutation.updateLectureViewHistory").
-export function lectureViewHistory(sessionId, klassId, lectureId, videoPlayed) {
+export function lectureViewHistory(sessionId, klassId, lectureId, videoPlayed, who) {
   const variables = { klassId, lectureId, videoPlayed: !!videoPlayed };
   if (sessionId) variables.sessionId = sessionId;
   return write(
@@ -294,9 +304,14 @@ export function lectureViewHistory(sessionId, klassId, lectureId, videoPlayed) {
       `mutation TvLectureViewHistory($sessionId: String, $klassId: String!, $lectureId: String!, $videoPlayed: Boolean!) {
         sessionId: updateLectureViewHistory(sessionId: $sessionId, klassId: $klassId, lectureId: $lectureId, videoPlayed: $videoPlayed)
       }`,
-      variables
+      variables,
+      { who }
     ).then((data) => data.sessionId || sessionId || null)
   );
+}
+
+export function signedInAs() {
+  return account();
 }
 
 function requestId() {
@@ -318,7 +333,7 @@ async function rest(path, payload, token) {
     const res = await lunaCall(`${SERVICE}/rest`, { path, body, token, requestId: id, userAgent: navigator.userAgent });
     return res.status;
   }
-  const res = await fetch(endpoint('api') + path, {
+  const res = await request(endpoint('api') + path, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-request-id': id },
     body,
@@ -334,15 +349,16 @@ async function rest(path, payload, token) {
 // videoId may be a promise while the player is still looking it up; the interval is
 // tracked as a write from the moment it was earned.
 export function reportPlaytime(lessonId, videoId, playbackLocation, interval) {
+  const who = account(); // whoever earned it; dropped if another account signs in meanwhile
   const path = `/v1/playtime-tracking/lessons/${encodeURIComponent(lessonId)}/play`;
   const earned = { playbackLocation, interval, timestamp: new Date().toISOString() };
   return write(
     Promise.resolve(videoId).then((id) => {
       if (!id) return null; // no video id for this lesson: nothing to report it against
       const payload = { ...earned, videoId: id };
-      return idToken()
-        .then((token) => rest(path, payload, token))
-        .then((status) => (status === 401 ? idToken({ force: true }).then((token) => rest(path, payload, token)) : status))
+      const send = (force) => idToken({ force }).then((token) => (account() === who ? rest(path, payload, token) : 0));
+      return send(false)
+        .then((status) => (status === 401 ? send(true) : status))
         .then((status) => {
           if (status >= 400) throw new ApiError(`시청 시간을 보내지 못했어요. (${status})`, 'PLAYTIME');
           return status;

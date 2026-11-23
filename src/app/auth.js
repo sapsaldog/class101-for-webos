@@ -1,6 +1,7 @@
 // Firebase Auth over REST: email/password sign-in, then ID tokens refreshed from
 // the long-lived refresh token kept in localStorage (the TV app's own storage).
 import { FIREBASE_API_KEY, endpoint } from './config.js';
+import { request } from './net.js';
 
 const STORE = 'c101:session';
 
@@ -44,7 +45,7 @@ export function currentUser() {
 async function postJson(url, body, type) {
   let res;
   try {
-    res = await fetch(url, {
+    res = await request(url, {
       method: 'POST',
       headers: { 'content-type': type || 'application/json' },
       body,
@@ -52,7 +53,12 @@ async function postJson(url, body, type) {
   } catch (e) {
     throw new AuthError('인터넷에 연결할 수 없어요.', 'NETWORK');
   }
-  const data = await res.json().catch(() => ({}));
+  let data = {};
+  try {
+    data = JSON.parse(res.text) || {};
+  } catch (e) {
+    /* not JSON */
+  }
   return { res, data };
 }
 

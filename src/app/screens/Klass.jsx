@@ -1,37 +1,53 @@
-import { useContext, useEffect, useState } from 'preact/hooks';
+import { useContext, useEffect, useRef, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { curriculum, flattenLectures, settled, writing, recentLecture } from '../api.js';
+import { curriculum, classLastLesson, flattenLectures, settled, writing } from '../api.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { duration } from '../format.js';
+import { toast } from '../overlay.js';
 
 export default function Klass({ klassId, title, cover, lastLessonId, restoreFocus }) {
   const nav = useContext(Nav);
   const [klass, setKlass] = useState(null);
+  const [lastId, setLastId] = useState(lastLessonId);
   const [error, setError] = useState('');
+  // Newest answers, for 이어보기 pressed while the reload after the player is pending.
+  const now = useRef({ klass: null, lastId: lastLessonId, alive: true, refreshing: null });
 
   useEffect(() => {
-    let alive = true;
+    const st = now.current;
+    st.alive = true;
     let latest = 0;
     const load = () => {
       const n = ++latest; // an older answer must not replace a newer one
-      return curriculum(klassId)
-        .then((k) => alive && n === latest && setKlass(k))
+      return Promise.all([curriculum(klassId), classLastLesson(klassId).catch(() => null)])
+        .then(([k, last]) => {
+          if (!st.alive || n !== latest) return;
+          st.klass = k;
+          setKlass(k);
+          if (last) {
+            st.lastId = last; // what Class101 has now, not what Home knew
+            setLastId(last);
+          }
+        })
         .catch((err) => {
-          if (alive && n === latest && !nav.fail(err)) setError(err.message);
+          if (st.alive && n === latest && !nav.fail(err)) setError(err.message);
         });
     };
     // Back from the player its last writes may still be on the way: show the list now,
-    // and load it again once they are done, so ✓ marks are current.
+    // and load it again once they are done, so ✓ marks and 이어보기 are current.
     if (writing()) load();
-    settled().then(() => alive && load());
+    const reload = settled()
+      .then(() => st.alive && load())
+      .then(() => {
+        if (st.refreshing === reload) st.refreshing = null;
+      });
+    st.refreshing = reload;
     return () => {
-      alive = false;
+      st.alive = false;
     };
   }, [klassId]);
 
   const lectures = klass ? flattenLectures(klass) : [];
-  // The lecture opened last on this TV beats the one Home knew when it opened us.
-  const lastId = recentLecture(klassId) || lastLessonId;
   const current = lectures.find((l) => l._id === lastId);
   const firstOpen = lectures.find((l) => l.canAccess !== false);
 
@@ -43,7 +59,19 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
   }, [ready]);
 
   function play(lec) {
-    nav.push('player', { klassId, lectureId: lec._id, lectures });
+    nav.push('player', { klassId, lectureId: lec._id, lectures: flattenLectures(now.current.klass || klass) });
+  }
+
+  // Waits for the reload after the player, so it can't reopen the lecture from before.
+  function resume() {
+    const go = () => {
+      const st = now.current;
+      const lec = st.klass && flattenLectures(st.klass).find((l) => l._id === st.lastId);
+      if (st.alive && lec) play(lec);
+    };
+    if (!now.current.refreshing) return go();
+    toast('최근 강의를 확인하는 중…', 1500);
+    now.current.refreshing.then(go);
   }
 
   let n = 0;
@@ -54,7 +82,7 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
         <h1>{(klass && klass.title) || title}</h1>
         <div class="muted">{lectures.length ? `강의 ${lectures.length}개 · 완료 ${lectures.filter((l) => l.completed).length}개` : ''}</div>
         {current && (
-          <button class="btn primary focusable" data-fk="resume" onClick={() => play(current)}>
+          <button class="btn primary focusable" data-fk="resume" onClick={resume}>
             ▶ 이어보기
           </button>
         )}

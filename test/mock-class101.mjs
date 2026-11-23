@@ -18,9 +18,7 @@ export async function startMock({ videoFor, data, serveOpts } = {}) {
 // timeline: { op, lessonId, at, doneAt } per GraphQL request (doneAt: when answered).
 const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], views: [], enter: [], sessions: [], playtime: [], timeline: [] };
 // hold[operationName] = ms delays that operation's answer (to test waiting for writes).
-// state.followViews = false makes the server lag: views stop moving k1's last lesson.
 const hold = {};
-const state = { followViews: true };
 let base = '';
 
 const LECTURES = [
@@ -29,8 +27,9 @@ const LECTURES = [
   { _id: 'l3', index: 2, title: '실전 연습', completed: false, canAccess: true, video: { contentId: 'v3', duration: 150 } },
   { _id: 'l4', index: 3, title: '잠긴 보너스 강의', completed: false, canAccess: false, video: { contentId: 'v4', duration: 150 } },
 ];
-// Class k1 follows what the app reports: its last lesson is the last lecture opened,
-// its progress the share of completed lectures. Class progress is in the real API's
+// Class k1 follows what the app reports, as Class101 does: its last lesson is the lesson
+// whose position was saved last (opening a lecture doesn't move it), its progress the
+// share of completed lectures. Class progress is in the real API's
 // units, a percentage 0-100; k2 sits at 1% (an old bug showed that as 100%).
 const k1 = { lastLecture: 'l2' };
 const k1Progress = () => Math.round((LECTURES.filter((l) => l.completed).length / LECTURES.length) * 100);
@@ -121,7 +120,10 @@ function graphql(body, auth) {
     }
     case 'TvSetLessonProgress':
       calls.progress.push([v.lessonId, v.progressSeconds]);
+      if (LECTURES.some((l) => l._id === v.lessonId)) k1.lastLecture = v.lessonId;
       return { data: { setLessonProgress: true } };
+    case 'TvClassLastLesson':
+      return { data: { class: { id: v.classId, lastLesson: { id: v.classId === 'k1' ? k1.lastLecture : 'l2' } } } };
     case 'TvCompleteLecture': {
       calls.complete.push(v.lectureId);
       const l = LECTURES.find((x) => x._id === v.lectureId);
@@ -130,7 +132,6 @@ function graphql(body, auth) {
     }
     case 'TvViewHistory':
       calls.views.push([v.klassId, v.lectureId]);
-      if (v.klassId === 'k1' && state.followViews) k1.lastLecture = v.lectureId;
       return { data: { updateUserViewHistory: true } };
     case 'TvKlassTicket':
       return { data: { klassTicket: { _id: `ticket-${v.klassId}` } } };
@@ -240,5 +241,5 @@ const server = http.createServer(async (req, res) => {
 
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  return { base, calls, hold, state, close: () => server.close() };
+  return { base, calls, hold, close: () => server.close() };
 }
