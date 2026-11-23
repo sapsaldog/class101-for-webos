@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
 import { myClasses, lastClass, settled } from '../api.js';
-import { currentUser, loginId, signOut } from '../auth.js';
+import { currentUser, loginId, signOut, AuthError } from '../auth.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { toggleHelp, toast } from '../overlay.js';
 import { percent } from '../format.js';
@@ -30,15 +30,22 @@ export default function Home({ restoreFocus }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const user = currentUser();
   // st.last: the last class as Class101 answered after the player's writes (fresh);
-  // refreshing: that reload, until it lands (the list on screen is cached till then).
-  const st = useRef({ alive: true, last: null, fresh: false, refreshing: null, resuming: false });
+  // refreshing: that reload, until it lands (the list on screen is cached till then);
+  // list: the list on screen, for 더 보기.
+  const st = useRef({ alive: true, last: null, fresh: false, refreshing: null, resuming: false, list: mine && mine.list });
 
   useEffect(() => {
     const now = st.current;
     now.alive = true;
     const load = () =>
       Promise.all([lastClass().then((l) => ({ l }), () => null), myClasses().then((r) => ({ r }), (err) => ({ err }))]).then(([a, b]) => {
-        if (!now.alive || loginId() !== who) return; // another login took over meanwhile
+        if (!now.alive) return;
+        if (loginId() !== who) {
+          // Signed out under us (the refresh token was rejected): let App go to sign-in.
+          // Another login took over: its own screens load its data.
+          if (!loginId()) nav.fail(b.err instanceof AuthError ? b.err : new AuthError('로그인이 필요해요.', 'NO_SESSION'));
+          return;
+        }
         const prev = cachedFor(who);
         now.fresh = !!a;
         if (a) {
@@ -46,7 +53,10 @@ export default function Home({ restoreFocus }) {
           setHero(a.l);
         }
         const list = b.r ? { items: b.r.items, pageInfo: b.r.pageInfo } : prev && prev.list;
-        if (b.r) setData(list);
+        if (b.r) {
+          now.list = list;
+          setData(list);
+        }
         else if (!nav.fail(b.err)) setError(b.err.message);
         cache = { who, last: a ? a.l : prev && prev.last, list };
       });
@@ -91,20 +101,32 @@ export default function Home({ restoreFocus }) {
     if (!focusKey(restoreFocus) && !focusKey('hero')) focusFirst('.card');
   }, [ready]);
 
+  // 더 보기 goes on from the list as it is after the reload (not the cached one it
+  // replaced), and only appends while that list is still the one on screen.
   function more() {
+    const now = st.current;
     setLoadingMore(true);
-    myClasses(data.pageInfo.endCursor)
-      .then((list) => {
-        if (!st.current.alive || loginId() !== who) return;
-        const next = { items: data.items.concat(list.items), pageInfo: list.pageInfo };
-        setData(next);
-        cache = { who, last: cache && cache.who === who ? cache.last : null, list: next };
-        setLoadingMore(false);
+    const mineStill = () => now.alive && loginId() === who;
+    Promise.resolve(now.refreshing)
+      .then(() => {
+        const base = now.list;
+        if (!base || !base.pageInfo.hasNextPage) return null;
+        return myClasses(base.pageInfo.endCursor).then((page) => {
+          if (!mineStill() || now.list !== base) return;
+          const next = { items: base.items.concat(page.items), pageInfo: page.pageInfo };
+          now.list = next;
+          setData(next);
+          cache = { who, last: cache && cache.who === who ? cache.last : null, list: next };
+        });
       })
-      .catch((err) => {
-        setLoadingMore(false);
-        if (!nav.fail(err)) setError(err.message);
-      });
+      .then(
+        () => mineStill() && setLoadingMore(false),
+        (err) => {
+          if (!mineStill()) return;
+          setLoadingMore(false);
+          if (!nav.fail(err)) setError(err.message);
+        }
+      );
   }
 
   function logout() {

@@ -71,11 +71,16 @@ async function postJson(url, body, type) {
   return { res, data };
 }
 
+// Each sign-in or hand-over; a newer one wins over one still on the way.
+let attempts = 0;
+
 export async function signIn(email, password) {
+  const attempt = ++attempts;
   const { res, data } = await postJson(
     `${endpoint('signIn')}?key=${FIREBASE_API_KEY}`,
     JSON.stringify({ email, password, returnSecureToken: true, clientType: 'CLIENT_TYPE_WEB' })
   );
+  if (attempt !== attempts) throw new AuthError('다른 로그인으로 바뀌었어요.', 'SESSION_CHANGED');
   if (!res.ok) {
     const code = String((data.error && data.error.message) || res.status).split(' ')[0];
     throw new AuthError(MESSAGES[code] || `로그인하지 못했어요. (${code})`, code);
@@ -94,6 +99,10 @@ export async function signIn(email, password) {
 let refreshing = null;
 let refreshingFor = null;
 
+// Firebase securetoken errors that mean the refresh token is no good any more. Any
+// other refusal (a 403 from a proxy, a 5xx) keeps the session for the next try.
+const DEAD_LOGIN = /^(TOKEN_EXPIRED|INVALID_REFRESH_TOKEN|MISSING_REFRESH_TOKEN|INVALID_GRANT_TYPE|USER_DISABLED|USER_NOT_FOUND|PROJECT_NUMBER_MISMATCH)\b/;
+
 async function refresh() {
   const started = session; // the login this refresh belongs to
   const { res, data } = await postJson(
@@ -105,7 +114,7 @@ async function refresh() {
   // must not land in that session.
   if (session !== started) throw new AuthError('로그인이 바뀌었어요. 다시 시도해 주세요.', 'SESSION_CHANGED');
   if (!res.ok) {
-    if (res.status === 400 || res.status === 401 || res.status === 403) {
+    if (DEAD_LOGIN.test(String((data.error && data.error.message) || ''))) {
       save(null);
       throw new AuthError('로그인이 만료됐어요. 다시 로그인해 주세요.', 'SESSION_EXPIRED');
     }
@@ -144,6 +153,7 @@ export function idToken({ force = false } = {}) {
 // Google/Kakao/Apple accounts have no password, so they sign in on a computer
 // and a computer hands the Firebase refresh token to the TV (scripts/tv-login.mjs).
 export async function adoptRefreshToken(refreshToken, email) {
+  ++attempts;
   save({ sid: newLoginId(), email: email || '', uid: '', idToken: '', refreshToken, expiresAt: 0 });
   const sid = session.sid;
   const replaced = () => !session || session.sid !== sid;

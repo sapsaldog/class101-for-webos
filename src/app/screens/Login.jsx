@@ -42,6 +42,7 @@ export default function Login({ message, pending }) {
       }
       nav.reset('home');
     } catch (err) {
+      if (err.code === 'SESSION_CHANGED') return; // a hand-over signed in meanwhile and took over
       setBusy(false);
       setError(err.message);
       password.current.focus();

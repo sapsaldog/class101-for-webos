@@ -114,7 +114,9 @@ export async function myClasses(after) {
 export async function lastClass() {
   const data = await gql(
     'TvLastClass',
-    `query TvLastClass { lastClass { id title coverImageURL progressRatio lastLesson { id } creator { nickName } } }`
+    `query TvLastClass { lastClass { id title coverImageURL progressRatio lastLesson { id } creator { nickName } } }`,
+    {},
+    { strict: true } // a failed lastLesson must not read as "no last lesson"
   );
   return data.lastClass || null;
 }
@@ -223,6 +225,7 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
     // Leaving saves twice (Back, then unmount): skip the same position of the same lesson
     // saved just before, with no other lesson in between.
     if (lastSent && lastSent.key === key && lastSent.value === value && Date.now() - lastSent.at < 5000) return null;
+    lastSent = null; // set again only once this one is confirmed
     return gql(
       'TvSetLessonProgress',
       `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {

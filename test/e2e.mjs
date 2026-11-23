@@ -331,6 +331,15 @@ try {
   check('로그아웃 returns to the login screen with the email remembered', await page.eval(`document.querySelector('input[type=email]').value === 'tv@example.com'`));
   check('…and the password field focused', (await active()) === 'password', await active());
 
+  // A login revoked on Class101's side (refresh token rejected) found at startup: the
+  // app goes to the sign-in screen with the reason, instead of loading forever.
+  await page.eval(`(() => { window.__beforeReload = true; localStorage.setItem('c101:session', JSON.stringify({ sid: 'x', email: 'tv@example.com', idToken: '', refreshToken: 'revoked', expiresAt: 0 })); location.reload(); })()`).catch(() => {});
+  await page.waitFor(`!window.__beforeReload && !!document.querySelector('.login')`, 8000, 'sign-in after a revoked login').catch(() => {});
+  check(
+    'a revoked login at startup goes to the sign-in screen with the reason',
+    await page.eval(`!!document.querySelector('.login') && /만료/.test((document.querySelector('.login .error') || {}).textContent || '') && !localStorage.getItem('c101:session')`)
+  );
+
   // Login handed over from the Mac (Google accounts): refresh token in launch params.
   const handover = async (token) => {
     const p2 = await Page.open(browser.port);

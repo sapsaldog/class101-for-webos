@@ -17,23 +17,29 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
   useEffect(() => {
     const st = now.current;
     st.alive = true;
-    let latest = 0;
     // afterWrites: this load runs after the player's writes, so its last lesson is
-    // current (fresh). The list and the last lesson are applied each on its own.
+    // current (fresh). The list and the last lesson are applied each on its own, and an
+    // older answer never replaces a newer one: a list from an earlier load still fills
+    // the screen when the newer load's list failed.
+    let started = 0;
+    let listShown = 0;
+    let lastShown = 0;
     const load = (afterWrites) => {
-      const n = ++latest; // an older answer must not replace a newer one
+      const n = ++started;
       if (afterWrites) st.lastFresh = false;
       return Promise.all([
         curriculum(klassId).then((k) => ({ k }), (err) => ({ err })),
         classLastLesson(klassId).then((id) => ({ id }), () => null),
       ]).then(([list, last]) => {
-        if (!st.alive || n !== latest) return;
-        if (list.k) {
+        if (!st.alive) return;
+        if (list.k && n > listShown) {
+          listShown = n;
           st.klass = list.k;
           setKlass(list.k);
-        } else if (!nav.fail(list.err)) setError(list.err.message);
-        if (last) {
+        } else if (list.err && !nav.fail(list.err) && n === started && !st.klass) setError(list.err.message);
+        if (last && n > lastShown) {
           // What Class101 has now, not what Home knew; none means no 이어보기.
+          lastShown = n;
           st.lastId = last.id;
           setLastId(last.id);
           if (afterWrites) st.lastFresh = true;
