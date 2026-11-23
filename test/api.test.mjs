@@ -15,7 +15,13 @@ store.set('c101:session', JSON.stringify({ sid: 's1', email: 'a@example.com', id
 // The save retries wait 2/5/15 s; shrink waits of 1-19 s to 1 ms here, so retries run
 // at once. (The 20 s request deadline and 0 ms timers stay as they are.)
 const realSetTimeout = globalThis.setTimeout;
-globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, ms >= 1000 && ms < 20000 ? 1 : ms, ...args);
+// A stuck queue must fail the test, not hang it.
+realSetTimeout(() => {
+  console.log('  ✗ timed out (a save step never finished)');
+  process.exit(1);
+}, 30000).unref();
+let shrink = true;
+globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, shrink && ms >= 1000 && ms < 20000 ? 1 : ms, ...args);
 
 const log = []; // requests in the order the fake server gets them
 const held = []; // replies waiting for release()
@@ -160,6 +166,32 @@ failNext.L = 1;
 api.saveProgress('L', 2);
 await flush();
 check('…and a newer position still gets its own tries', saves() === 'L@1 L@1 L@1 L@1 L@2 L@2', saves());
+
+// A newer position arriving while an older one waits to retry (real 2 s wait here)
+// ends that wait: the queue moves on at once and sends the newer one.
+reset();
+holding = false;
+shrink = false;
+failNext.M = 1;
+api.saveProgress('M', 1);
+await flush(); // the first try failed; the retry waits 2 s
+const wokeAt = Date.now();
+api.saveProgress('M', 9);
+await flush();
+const wokeAfter = Date.now() - wokeAt;
+shrink = true;
+check('a newer position cuts an older one\'s retry wait short', saves() === 'M@1 M@9' && wokeAfter < 1000, { saves: saves(), wokeAfter });
+
+// A position whose tries all failed goes out again first when its lecture reopens.
+reset();
+failNext.N = 4;
+api.saveProgress('N', 7);
+await flush();
+check('a position is kept after all its tries failed', saves() === 'N@7 N@7 N@7 N@7', saves());
+let nSaved = false;
+api.lessonSaved('N').then(() => (nSaved = true));
+await flush();
+check('…and reopening the lecture sends it again before reading where to resume', saves() === 'N@7 N@7 N@7 N@7 N@7' && nSaved, saves());
 
 // lessonSaved() waits for that lesson's queued saves.
 reset();
