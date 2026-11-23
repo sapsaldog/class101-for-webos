@@ -3,14 +3,14 @@
 // Class101 artwork. Plugged into the mock with startMock({ data: showcase }).
 
 const CLASSES = [
-  { id: 'k1', last: '선 긋기와 기본 도형', title: '아이패드로 시작하는 감성 드로잉', creator: '하루그림', cat: '드로잉', emoji: '🎨', colors: ['#ff9a8b', '#ff5e7e'], progress: 0.42 },
-  { id: 'k2', last: 'pandas로 표 다루기', title: '왕초보를 위한 파이썬 데이터 분석', creator: '데이터랩 민', cat: '개발', emoji: '🐍', colors: ['#5ee7df', '#3a7bd5'], progress: 0.18 },
-  { id: 'k3', last: '르방 키우기 3일차', title: '집에서 굽는 천연발효 빵', creator: '오븐 앞 소피', cat: '베이킹', emoji: '🥐', colors: ['#f6d365', '#fda085'], progress: 0.75 },
-  { id: 'k4', last: '말린 어깨 풀기', title: '하루 10분, 거북목 펴는 홈트레이닝', creator: '코치 준', cat: '운동', emoji: '🧘', colors: ['#89a7ff', '#6dd5ed'], progress: 0.3 },
-  { id: 'k5', last: '첫 문장 고르는 법', title: '읽히는 글쓰기: 첫 문장부터 퇴고까지', creator: '문장수선공', cat: '글쓰기', emoji: '✍️', colors: ['#b8e986', '#4fb286'], progress: 0.6 },
-  { id: 'k6', last: '역광에서 얼굴 살리기', title: '스마트폰으로 찍는 인물 사진', creator: '포토그래퍼 윤', cat: '사진', emoji: '📷', colors: ['#bdc3c7', '#5d6d7e'], progress: 0.1 },
-  { id: 'k7', last: '세븐스 코드 익히기', title: '기초부터 배우는 재즈 피아노', creator: '건반 위 레오', cat: '음악', emoji: '🎹', colors: ['#c471f5', '#fa71cd'], progress: 0.05 },
-  { id: 'k8', last: '물 주기 달력 만들기', title: '식물 집사 입문: 실내 가드닝', creator: '초록손 지니', cat: '라이프', emoji: '🪴', colors: ['#96fbc4', '#2f9e7a'], progress: 0.9 },
+  { id: 'k1', last: '선 긋기와 기본 도형', title: '아이패드로 시작하는 감성 드로잉', creator: '하루그림', cat: '드로잉', emoji: '🎨', colors: ['#ff9a8b', '#ff5e7e'], progress: 42 },
+  { id: 'k2', last: 'pandas로 표 다루기', title: '왕초보를 위한 파이썬 데이터 분석', creator: '데이터랩 민', cat: '개발', emoji: '🐍', colors: ['#5ee7df', '#3a7bd5'], progress: 18 },
+  { id: 'k3', last: '르방 키우기 3일차', title: '집에서 굽는 천연발효 빵', creator: '오븐 앞 소피', cat: '베이킹', emoji: '🥐', colors: ['#f6d365', '#fda085'], progress: 75 },
+  { id: 'k4', last: '말린 어깨 풀기', title: '하루 10분, 거북목 펴는 홈트레이닝', creator: '코치 준', cat: '운동', emoji: '🧘', colors: ['#89a7ff', '#6dd5ed'], progress: 30 },
+  { id: 'k5', last: '첫 문장 고르는 법', title: '읽히는 글쓰기: 첫 문장부터 퇴고까지', creator: '문장수선공', cat: '글쓰기', emoji: '✍️', colors: ['#b8e986', '#4fb286'], progress: 60 },
+  { id: 'k6', last: '역광에서 얼굴 살리기', title: '스마트폰으로 찍는 인물 사진', creator: '포토그래퍼 윤', cat: '사진', emoji: '📷', colors: ['#bdc3c7', '#5d6d7e'], progress: 10 },
+  { id: 'k7', last: '세븐스 코드 익히기', title: '기초부터 배우는 재즈 피아노', creator: '건반 위 레오', cat: '음악', emoji: '🎹', colors: ['#c471f5', '#fa71cd'], progress: 5 },
+  { id: 'k8', last: '물 주기 달력 만들기', title: '식물 집사 입문: 실내 가드닝', creator: '초록손 지니', cat: '라이프', emoji: '🪴', colors: ['#96fbc4', '#2f9e7a'], progress: 90 },
 ];
 const EXTRA = [
   { id: 'k9', title: '수채화로 그리는 여행 일러스트', creator: '물빛 화실', cat: '드로잉', emoji: '🖌️', colors: ['#84fab0', '#8fd3f4'] },

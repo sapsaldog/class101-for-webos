@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { curriculum, flattenLectures, settled, recentLecture } from '../api.js';
+import { curriculum, flattenLectures, settled, writing, recentLecture } from '../api.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { duration } from '../format.js';
 
@@ -11,15 +11,19 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
 
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      curriculum(klassId)
-        .then((k) => alive && setKlass(k))
+    let latest = 0;
+    const load = () => {
+      const n = ++latest; // an older answer must not replace a newer one
+      return curriculum(klassId)
+        .then((k) => alive && n === latest && setKlass(k))
         .catch((err) => {
-          if (alive && !nav.fail(err)) setError(err.message);
+          if (alive && n === latest && !nav.fail(err)) setError(err.message);
         });
-    // Back from the player: wait for its last writes (at most 4 s), and load again if
-    // some were slower, so ✓ marks are current.
-    settled(4000).then((done) => load().then(() => (done || !alive ? null : settled().then(() => alive && load()))));
+    };
+    // Back from the player its last writes may still be on the way: show the list now,
+    // and load it again once they are done, so ✓ marks are current.
+    if (writing()) load();
+    settled().then(() => alive && load());
     return () => {
       alive = false;
     };
@@ -31,10 +35,12 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
   const current = lectures.find((l) => l._id === lastId);
   const firstOpen = lectures.find((l) => l.canAccess !== false);
 
+  // Focus once, when the list first appears; a later reload must not move it.
+  const ready = !!klass;
   useEffect(() => {
-    if (!klass) return;
+    if (!ready) return;
     if (!focusKey(restoreFocus) && !focusKey('resume') && !focusKey('first')) focusFirst('.lec');
-  }, [klass]);
+  }, [ready]);
 
   function play(lec) {
     nav.push('player', { klassId, lectureId: lec._id, lectures });

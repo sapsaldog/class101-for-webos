@@ -18,7 +18,9 @@ export async function startMock({ videoFor, data, serveOpts } = {}) {
 // timeline: { op, lessonId, at, doneAt } per GraphQL request (doneAt: when answered).
 const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], views: [], enter: [], sessions: [], playtime: [], timeline: [] };
 // hold[operationName] = ms delays that operation's answer (to test waiting for writes).
+// state.followViews = false makes the server lag: views stop moving k1's last lesson.
 const hold = {};
+const state = { followViews: true };
 let base = '';
 
 const LECTURES = [
@@ -28,9 +30,10 @@ const LECTURES = [
   { _id: 'l4', index: 3, title: '잠긴 보너스 강의', completed: false, canAccess: false, video: { contentId: 'v4', duration: 150 } },
 ];
 // Class k1 follows what the app reports: its last lesson is the last lecture opened,
-// its progress the share of completed lectures.
+// its progress the share of completed lectures. Class progress is in the real API's
+// units, a percentage 0-100; k2 sits at 1% (an old bug showed that as 100%).
 const k1 = { lastLecture: 'l2' };
-const k1Progress = () => LECTURES.filter((l) => l.completed).length / LECTURES.length;
+const k1Progress = () => Math.round((LECTURES.filter((l) => l.completed).length / LECTURES.length) * 100);
 
 function lastLessonOf(i) {
   const l = LECTURES.find((x) => x._id === (i === 0 ? k1.lastLecture : 'l2'));
@@ -43,7 +46,7 @@ function classes() {
     title: `테스트 클래스 ${i + 1}: 아주 긴 제목이 두 줄까지 보이는지 확인하는 클래스`,
     coverImageURL: `${base}/cover.png`,
     accessible: true,
-    progressRatio: i === 0 ? k1Progress() : (i + 1) / 10,
+    progressRatio: i === 0 ? k1Progress() : i === 1 ? 1 : (i + 1) * 10,
     remainingDays: 100,
     lastLesson: lastLessonOf(i),
     creator: { nickName: `크리에이터 ${i + 1}` },
@@ -127,7 +130,7 @@ function graphql(body, auth) {
     }
     case 'TvViewHistory':
       calls.views.push([v.klassId, v.lectureId]);
-      if (v.klassId === 'k1') k1.lastLecture = v.lectureId;
+      if (v.klassId === 'k1' && state.followViews) k1.lastLecture = v.lectureId;
       return { data: { updateUserViewHistory: true } };
     case 'TvKlassTicket':
       return { data: { klassTicket: { _id: `ticket-${v.klassId}` } } };
@@ -237,5 +240,5 @@ const server = http.createServer(async (req, res) => {
 
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  return { base, calls, hold, close: () => server.close() };
+  return { base, calls, hold, state, close: () => server.close() };
 }

@@ -24,16 +24,18 @@ function parse(text) {
 }
 
 // GraphQL goes through the service on the TV: the web engine forces Accept-Language
-// to the TV menu language and Class101 then answers in English. If the bus itself
-// fails (the service is not installed, or it timed out), use fetch for a minute.
-// A network error reported by the service is just a network error.
+// to the TV menu language and Class101 then answers in English. Only a definite "no"
+// from the Luna bus (the service is not installed) switches to fetch, for a minute.
+// After a timeout, a garbled reply, or a network error the service reports, the
+// request may have gone out, so it is not sent again another way: a mutation could
+// apply twice.
 async function post(body, token) {
   if (onTv && Date.now() >= relayDownUntil) {
     try {
       const res = await lunaCall(`${SERVICE}/gql`, { body, token, language: 'ko', userAgent: navigator.userAgent });
       return { status: res.status, json: parse(res.body) };
     } catch (e) {
-      if (e.response && e.response.relayError) throw e;
+      if (e.uncertain || (e.response && e.response.relayError)) throw e;
       relayDownUntil = Date.now() + 60000;
     }
   }
@@ -168,28 +170,34 @@ function write(promise) {
   return promise;
 }
 
-// Resolves true once every write in flight has finished, or false when maxMs passes
-// first (then the caller can show what it has and load again on settled()).
-export function settled(maxMs) {
-  if (!pending.length) return Promise.resolve(true);
-  const all = Promise.all(pending.map((p) => p.catch(() => {}))).then(() => true);
-  return maxMs ? Promise.race([all, new Promise((r) => setTimeout(() => r(false), maxMs))]) : all;
+// Resolves once every write in flight now has finished. Each is bounded by its
+// transport's timeout (Luna 25 s on the TV).
+export function settled() {
+  return Promise.all(pending.map((p) => p.catch(() => {}))).then(() => undefined);
+}
+
+export function writing() {
+  return pending.length > 0;
 }
 
 // Per-account memory for this app session, keyed "<email> <id>".
-const accountKey = (id) => `${(currentUser() || {}).email || ''} ${id}`;
+const account = () => (currentUser() || {}).email || '';
+const accountKey = (id) => `${account()} ${id}`;
 
 // Position saves for one lesson go out one at a time, newest position wins: two
-// requests in flight could reach the server in the other order.
+// requests in flight could reach the server in the other order. A save still queued
+// when the account changes is dropped.
 const saves = {};
 export function saveProgress(lessonId, progressSeconds) {
-  const key = accountKey(lessonId);
+  const who = account();
+  const key = `${who} ${lessonId}`;
   const q = saves[key] || (saves[key] = { chain: Promise.resolve(), next: null, saved: null, savedAt: 0 });
   q.next = Math.max(0, Math.round(progressSeconds));
   q.chain = q.chain.then(() => {
     const value = q.next;
     if (value === null) return null; // already sent by an earlier step
     q.next = null;
+    if (account() !== who) return null;
     // Leaving saves twice (Back, then unmount): skip the same position saved just now.
     if (value === q.saved && Date.now() - q.savedAt < 5000) return null;
     return gql(
@@ -209,51 +217,68 @@ export function saveProgress(lessonId, progressSeconds) {
   return write(q.chain);
 }
 
-// The lecture last opened on this TV, per class. The class screen and the home hero
-// use it until the server's own last lesson catches up.
-const opened = {};
-export function recentLecture(klassId) {
-  return opened[accountKey(klassId)] || null;
+// Resolves when the lesson's queued position saves are done. The player waits for it
+// before reading the resume position, so reopening a lecture quickly can't resume
+// (and then save) from an older position.
+export function lessonSaved(lessonId) {
+  const q = saves[accountKey(lessonId)];
+  return q ? q.chain.then(() => undefined) : Promise.resolve();
 }
 
+// The lecture last opened on this TV, per class, for a few minutes: enough for the
+// class screen's 이어보기 and the home hero to follow it while the server's own last
+// lesson catches up, and short enough not to hide watching on another device.
+const OPENED_FOR_MS = 5 * 60 * 1000;
+const opened = {};
+export function recentLecture(klassId) {
+  const o = opened[accountKey(klassId)];
+  return o && Date.now() - o.at < OPENED_FOR_MS ? o.lectureId : null;
+}
+
+// Class tickets, cached once found (a class can get a ticket later).
 const tickets = {};
 function klassTicket(klassId) {
   const key = accountKey(klassId);
-  if (!tickets[key]) {
-    tickets[key] = gql(
-      'TvKlassTicket',
-      `query TvKlassTicket($klassId: String!) { klassTicket: getKlassTicketByKlassId(klassId: $klassId) { _id } }`,
-      { klassId }
-    ).then((data) => (data.klassTicket && data.klassTicket._id) || null);
-    tickets[key].catch(() => delete tickets[key]);
-  }
-  return tickets[key];
+  if (tickets[key]) return Promise.resolve(tickets[key]);
+  return gql(
+    'TvKlassTicket',
+    `query TvKlassTicket($klassId: String!) { klassTicket: getKlassTicketByKlassId(klassId: $klassId) { _id } }`,
+    { klassId }
+  ).then((data) => {
+    const id = (data.klassTicket && data.klassTicket._id) || null;
+    if (id) tickets[key] = id;
+    return id;
+  });
 }
 
-// Opening a lecture: the site sends both when its lecture page opens (the user's view
-// history, and enterLecture with the class ticket). Visits go out in opening order,
-// and a visit whose lecture is no longer open (isOpen() false) is dropped.
+// Opening a lecture: the site sends both when its lecture page opens, each on its own
+// (the user's view history, and enterLecture with the class ticket). Here visits go
+// out in opening order and finish even after the player closes; an older visit skips
+// enterLecture once a newer one exists, so a slow ticket lookup can't make it the
+// latest.
 let visits = Promise.resolve();
-export function openLecture(klassId, lectureId, isOpen) {
-  opened[accountKey(klassId)] = lectureId;
+let lastVisit = 0;
+export function openLecture(klassId, lectureId) {
+  const seq = ++lastVisit;
+  const who = account();
+  opened[accountKey(klassId)] = { lectureId, at: Date.now() };
   const run = async () => {
-    if (!isOpen()) return;
+    if (account() !== who) return;
     await gql(
       'TvViewHistory',
       `mutation TvViewHistory($klassId: String!, $lectureId: String!) { updateUserViewHistory(klassId: $klassId, missionId: $lectureId) }`,
       { klassId, lectureId }
-    );
-    const ticket = await klassTicket(klassId);
-    if (!ticket || !isOpen()) return; // the site skips enterLecture without a ticket too
+    ).catch(() => null);
+    const ticket = await klassTicket(klassId).catch(() => null);
+    if (!ticket || seq !== lastVisit || account() !== who) return; // the site skips it without a ticket too
     await gql(
       'TvEnterLecture',
       `mutation TvEnterLecture($klassTicketId: String!, $missionId: String) { enterLecture(klassTicketId: $klassTicketId, missionId: $missionId) { lastWatchedAt } }`,
       { klassTicketId: ticket, missionId: lectureId }
-    );
+    ).catch(() => null);
   };
-  const p = visits.then(run, run);
-  visits = p.catch(() => {});
-  return write(p);
+  visits = visits.then(run, run);
+  return write(visits);
 }
 
 // Lecture view session: the site sends this 10 s after the page opens and 10 s after
@@ -302,20 +327,27 @@ async function rest(path, payload, token) {
 }
 
 // Watch time. The site posts it for every 10 s of lecture played (counted on the
-// lecture's own clock, so every 5 s at 2x) and does not resend failed ones. It never
-// calls completeLectureV3 for video lectures: Class101 finishes those from watch time
-// (the site polls lectureV2ById.completed to notice). The app leaves it to Class101 too.
+// lecture's own clock, so every 5 s at 2x) and does not resend failed ones; here only
+// a 401 is retried once, with a refreshed token. It never calls completeLectureV3 for
+// video lectures: Class101 finishes those from watch time (the site polls
+// lectureV2ById.completed to notice). The app leaves it to Class101 too.
+// videoId may be a promise while the player is still looking it up; the interval is
+// tracked as a write from the moment it was earned.
 export function reportPlaytime(lessonId, videoId, playbackLocation, interval) {
   const path = `/v1/playtime-tracking/lessons/${encodeURIComponent(lessonId)}/play`;
-  const payload = { playbackLocation, interval, timestamp: new Date().toISOString(), videoId };
+  const earned = { playbackLocation, interval, timestamp: new Date().toISOString() };
   return write(
-    idToken()
-      .then((token) => rest(path, payload, token))
-      .then((status) => (status === 401 ? idToken({ force: true }).then((token) => rest(path, payload, token)) : status))
-      .then((status) => {
-        if (status >= 400) throw new ApiError(`시청 시간을 보내지 못했어요. (${status})`, 'PLAYTIME');
-        return status;
-      })
+    Promise.resolve(videoId).then((id) => {
+      if (!id) return null; // no video id for this lesson: nothing to report it against
+      const payload = { ...earned, videoId: id };
+      return idToken()
+        .then((token) => rest(path, payload, token))
+        .then((status) => (status === 401 ? idToken({ force: true }).then((token) => rest(path, payload, token)) : status))
+        .then((status) => {
+          if (status >= 400) throw new ApiError(`시청 시간을 보내지 못했어요. (${status})`, 'PLAYTIME');
+          return status;
+        });
+    })
   );
 }
 

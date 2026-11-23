@@ -17,15 +17,17 @@ var keepAlive = null;
 var REST_PATH = /^\/v1\/playtime-tracking\/lessons\/[A-Za-z0-9_-]{1,64}\/play$/;
 var DEFAULT_UA = 'Mozilla/5.0 (Web0S; Linux/SmartTV) WebAppManager class101-for-webos';
 
-// Header values come from the caller. Take only values of the expected shape: Node
-// throws on characters such as CR/LF in a header while building the request.
+// Fields come from the caller: take only strings, and for headers only values of the
+// expected shape (Node throws on characters such as CR/LF in a header).
 var PRINTABLE = /^[\x20-\x7e]{1,512}$/;
 var TOKEN = /^[A-Za-z0-9._-]{1,4096}$/;
 var LANGUAGE = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/;
 var REQUEST_ID = /^[A-Za-z0-9-]{1,64}$/;
+function text(value) {
+  return typeof value === 'string' ? value : '';
+}
 function headerValue(value, pattern) {
-  var v = value === undefined || value === null ? '' : String(value);
-  return pattern.test(v) ? v : null;
+  return typeof value === 'string' && pattern.test(value) ? value : null;
 }
 
 service.register('ping', function (message) {
@@ -39,7 +41,7 @@ service.register('gql', function (message) {
 
 service.register('rest', function (message) {
   var p = message.payload || {};
-  var path = String(p.path || '');
+  var path = text(p.path);
   if (!REST_PATH.test(path)) {
     message.respond({ returnValue: false, errorText: 'path not allowed' });
     return;
@@ -62,7 +64,7 @@ function relay(message, host, path, extra) {
   function fail(e) {
     answer({ returnValue: false, relayError: true, errorText: String((e && e.message) || e) });
   }
-  var body = String(p.body || '');
+  var body = text(p.body);
   var headers = {
     'content-type': 'application/json',
     accept: 'application/json',
@@ -75,7 +77,7 @@ function relay(message, host, path, extra) {
     headers[k] = extra[k];
   });
   if (p.token !== undefined && p.token !== null && p.token !== '') {
-    var token = headerValue(p.token, TOKEN);
+    var token = headerValue(p.token, TOKEN); // a non-string token is refused too
     if (!token) return fail('bad token');
     headers.authorization = 'Bearer ' + token;
   }

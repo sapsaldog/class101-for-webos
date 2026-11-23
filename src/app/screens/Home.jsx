@@ -38,9 +38,9 @@ export default function Home({ restoreFocus }) {
           if (!alive || nav.fail(err)) return;
           setError(err.message);
         });
-    // Back from the player its last saves may still be on the way: wait for them (at
-    // most 4 s), and if some were slower, load again once they are done.
-    settled(4000).then((done) => load().then(() => (done || !alive ? null : settled().then(() => alive && load()))));
+    // Back from the player its last writes may still be on the way: the cached list
+    // stays up until they are done, then the server's view loads.
+    settled().then(() => alive && load());
     return () => {
       alive = false;
     };

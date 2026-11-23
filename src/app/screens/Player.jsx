@@ -9,6 +9,7 @@ import {
   curriculum,
   flattenLectures,
   saveProgress,
+  lessonSaved,
   openLecture,
   lectureViewHistory,
   reportPlaytime,
@@ -119,7 +120,10 @@ export default function Player({ klassId, lectureId, lectures }) {
     showCurtain(true, '강의를 불러오는 중…');
     Promise.all([
       fetchLecture(lectureId),
-      fetchLesson(lectureId).catch(() => null),
+      // After this lesson's queued saves, so a quick reopen resumes from the newest one.
+      lessonSaved(lectureId)
+        .then(() => fetchLesson(lectureId))
+        .catch(() => null),
       s.list ? null : curriculum(klassId).then(flattenLectures).catch(() => null),
     ])
       .then(([lec, les, list]) => {
@@ -319,8 +323,7 @@ export default function Player({ klassId, lectureId, lectures }) {
     const klass = (info.lecture.klass && info.lecture.klass._id) || klassId;
     if (!klass) return;
     let alive = true;
-    const isOpen = () => alive;
-    openLecture(klass, lectureId, isOpen).catch(() => {});
+    openLecture(klass, lectureId);
 
     // View session, like the site: VIEW_SESSION_DELAY s after opening and after the
     // playing state changes ('playing' / 'pause'), one request at a time, with the id
@@ -333,9 +336,10 @@ export default function Player({ klassId, lectureId, lectures }) {
     const schedule = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
+        const wasPlaying = playing; // the state this report is about, not the one at sending time
         sending = sending.then(() => {
           if (!alive) return null;
-          return lectureViewHistory(session, klass, lectureId, playing).then(
+          return lectureViewHistory(session, klass, lectureId, wasPlaying).then(
             (id) => {
               session = id;
               wait = VIEW_SESSION_DELAY;
@@ -365,8 +369,9 @@ export default function Player({ klassId, lectureId, lectures }) {
 
     // Watch time on the lecture's clock (content seconds), like the site: the sampling
     // baseline restarts on seeks, pauses and buffering, and steps over 3 s don't count;
-    // a remainder under PLAYTIME_EVERY is dropped. If the lesson lookup failed, the
-    // video id is looked up again when a report is due.
+    // a remainder under PLAYTIME_EVERY is dropped (the site does both too). If the
+    // lesson lookup failed, the video id is looked up again when a report is due; an
+    // earned report is sent even if the player closes meanwhile.
     let videoId = info.lesson && info.lesson.video && info.lesson.video.id;
     let lookup = null;
     const withVideoId = () => {
@@ -398,9 +403,7 @@ export default function Player({ klassId, lectureId, lectures }) {
       last = t;
       if (played >= PLAYTIME_EVERY) {
         played %= PLAYTIME_EVERY;
-        withVideoId()
-          .then((id) => (id && alive ? reportPlaytime(lectureId, id, t, PLAYTIME_EVERY) : null))
-          .catch(() => {});
+        reportPlaytime(lectureId, withVideoId(), t, PLAYTIME_EVERY).catch(() => {});
       }
     }, 500);
 
