@@ -182,16 +182,16 @@ const wokeAfter = Date.now() - wokeAt;
 shrink = true;
 check('a newer position cuts an older one\'s retry wait short', saves() === 'M@1 M@9' && wokeAfter < 1000, { saves: saves(), wokeAfter });
 
-// A position whose tries all failed goes out again first when its lecture reopens.
+// A position whose tries all failed is dropped (documented): reopening its lecture
+// doesn't send it again.
 reset();
 failNext.N = 4;
 api.saveProgress('N', 7);
 await flush();
-check('a position is kept after all its tries failed', saves() === 'N@7 N@7 N@7 N@7', saves());
 let nSaved = false;
 api.lessonSaved('N').then(() => (nSaved = true));
 await flush();
-check('…and reopening the lecture sends it again before reading where to resume', saves() === 'N@7 N@7 N@7 N@7 N@7' && nSaved, saves());
+check('a position whose tries all failed is dropped, not sent again on reopen', saves() === 'N@7 N@7 N@7 N@7' && nSaved, saves());
 
 // lessonSaved() waits for that lesson's queued saves.
 reset();

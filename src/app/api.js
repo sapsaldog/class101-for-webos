@@ -226,17 +226,15 @@ const lessonStep = {}; // "<who> <lessonId>" → its newest queued step
 // land after a later lesson's save, and lessonSaved()/settled() wait for its outcome.
 // Each position gets these tries; it stops early once a newer position for the
 // lesson arrives (that one's step sends it; the wait is cut short so the queue moves
-// on at once). A position whose tries all failed is kept for this app session and
-// sent again first when its lecture is reopened (lessonSaved). The site doesn't retry
-// at all; nothing is kept across an app restart.
+// on at once). A position whose tries all failed (an outage of ~22 s) is dropped: the
+// site doesn't retry at all, and keeping it to send later brings its own ordering
+// problems (it would move the class's last lesson whenever it finally lands).
 const RETRY_MS = [2000, 5000, 15000];
 const waking = {}; // key → ends a retry wait early
-const unconfirmed = {}; // key → position whose tries all failed
 
 export function saveProgress(lessonId, progressSeconds, who = account()) {
   const key = `${who} ${lessonId}`;
   unsent[key] = Math.max(0, Math.round(progressSeconds));
-  delete unconfirmed[key]; // a newer position replaces it
   if (waking[key]) waking[key](); // an older position waiting to retry stops waiting
   const step = () => {
     const value = unsent[key];
@@ -263,11 +261,7 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
             return null;
           }
           const superseded = () => unsent[key] !== undefined || account() !== who;
-          if (superseded()) return null;
-          if (n >= RETRY_MS.length) {
-            unconfirmed[key] = value; // all tries failed: sent again when the lecture reopens
-            return null;
-          }
+          if (superseded() || n >= RETRY_MS.length) return null;
           return new Promise((r) => {
             const timer = setTimeout(r, RETRY_MS[n]);
             waking[key] = () => {
@@ -290,10 +284,7 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
 // before them). The player waits for it before reading the resume position, so
 // reopening a lecture quickly can't resume (and then save) from an older position.
 export function lessonSaved(lessonId) {
-  const key = `${account()} ${lessonId}`;
-  // A position whose tries all failed earlier in this session goes out first.
-  if (unconfirmed[key] !== undefined && unsent[key] === undefined) saveProgress(lessonId, unconfirmed[key]);
-  const p = lessonStep[key];
+  const p = lessonStep[`${account()} ${lessonId}`];
   return p ? p.then(() => undefined) : Promise.resolve();
 }
 
