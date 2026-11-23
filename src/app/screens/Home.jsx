@@ -1,14 +1,16 @@
 import { useContext, useEffect, useRef, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
 import { myClasses, lastClass, settled } from '../api.js';
-import { currentUser, signOut } from '../auth.js';
+import { currentUser, loginId, signOut } from '../auth.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { toggleHelp, toast } from '../overlay.js';
 import { percent } from '../format.js';
 
-// Kept across visits so coming back from a class shows the list instantly,
-// then refreshes it (progress changes after watching).
+// Kept across visits so coming back from a class shows the list instantly, then
+// refreshes it (progress changes after watching). It belongs to one login: another
+// account on the same TV never sees it. { who, last, list: { items, pageInfo } }
 let cache = null;
+const cachedFor = (who) => (cache && cache.who === who ? cache : null);
 
 function Progress({ ratio }) {
   return (
@@ -20,7 +22,10 @@ function Progress({ ratio }) {
 
 export default function Home({ restoreFocus }) {
   const nav = useContext(Nav);
-  const [data, setData] = useState(cache);
+  const who = loginId();
+  const mine = cachedFor(who);
+  const [data, setData] = useState(mine && mine.list); // the class list
+  const [hero, setHero] = useState(mine && mine.last); // the last class, shown on its own
   const [error, setError] = useState('');
   const [loadingMore, setLoadingMore] = useState(false);
   const user = currentUser();
@@ -33,13 +38,17 @@ export default function Home({ restoreFocus }) {
     now.alive = true;
     const load = () =>
       Promise.all([lastClass().then((l) => ({ l }), () => null), myClasses().then((r) => ({ r }), (err) => ({ err }))]).then(([a, b]) => {
-        if (!now.alive) return;
+        if (!now.alive || loginId() !== who) return; // another login took over meanwhile
+        const prev = cachedFor(who);
         now.fresh = !!a;
-        if (a) now.last = a.l;
-        if (b.r) {
-          cache = { last: a ? a.l : cache && cache.last, items: b.r.items, pageInfo: b.r.pageInfo };
-          setData(cache);
-        } else if (!nav.fail(b.err)) setError(b.err.message);
+        if (a) {
+          now.last = a.l;
+          setHero(a.l);
+        }
+        const list = b.r ? { items: b.r.items, pageInfo: b.r.pageInfo } : prev && prev.list;
+        if (b.r) setData(list);
+        else if (!nav.fail(b.err)) setError(b.err.message);
+        cache = { who, last: a ? a.l : prev && prev.last, list };
       });
     // Back from the player its last writes may still be on the way: the cached list
     // stays up until they are done, then the server's view loads.
@@ -76,7 +85,7 @@ export default function Home({ restoreFocus }) {
   }
 
   // Focus once content exists: where we left off, else the hero, else the first card.
-  const ready = !!data;
+  const ready = !!data || !!hero;
   useEffect(() => {
     if (!ready) return;
     if (!focusKey(restoreFocus) && !focusKey('hero')) focusFirst('.card');
@@ -86,8 +95,10 @@ export default function Home({ restoreFocus }) {
     setLoadingMore(true);
     myClasses(data.pageInfo.endCursor)
       .then((list) => {
-        cache = { ...data, items: data.items.concat(list.items), pageInfo: list.pageInfo };
-        setData(cache);
+        if (!st.current.alive || loginId() !== who) return;
+        const next = { items: data.items.concat(list.items), pageInfo: list.pageInfo };
+        setData(next);
+        cache = { who, last: cache && cache.who === who ? cache.last : null, list: next };
         setLoadingMore(false);
       })
       .catch((err) => {
@@ -102,7 +113,7 @@ export default function Home({ restoreFocus }) {
     nav.reset('login');
   }
 
-  const last = data && data.last && data.last.lastLesson ? data.last : null;
+  const last = hero && hero.lastLesson ? hero : null;
 
   return (
     <div class="screen home">

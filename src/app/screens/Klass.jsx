@@ -18,29 +18,33 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
     const st = now.current;
     st.alive = true;
     let latest = 0;
-    const load = () => {
+    // afterWrites: this load runs after the player's writes, so its last lesson is
+    // current (fresh). The list and the last lesson are applied each on its own.
+    const load = (afterWrites) => {
       const n = ++latest; // an older answer must not replace a newer one
-      return Promise.all([curriculum(klassId), classLastLesson(klassId).then((id) => ({ id }), () => null)])
-        .then(([k, last]) => {
-          if (!st.alive || n !== latest) return;
-          st.klass = k;
-          setKlass(k);
-          st.lastFresh = !!last;
-          if (last) {
-            // What Class101 has now, not what Home knew; none means no 이어보기.
-            st.lastId = last.id;
-            setLastId(last.id);
-          }
-        })
-        .catch((err) => {
-          if (st.alive && n === latest && !nav.fail(err)) setError(err.message);
-        });
+      if (afterWrites) st.lastFresh = false;
+      return Promise.all([
+        curriculum(klassId).then((k) => ({ k }), (err) => ({ err })),
+        classLastLesson(klassId).then((id) => ({ id }), () => null),
+      ]).then(([list, last]) => {
+        if (!st.alive || n !== latest) return;
+        if (list.k) {
+          st.klass = list.k;
+          setKlass(list.k);
+        } else if (!nav.fail(list.err)) setError(list.err.message);
+        if (last) {
+          // What Class101 has now, not what Home knew; none means no 이어보기.
+          st.lastId = last.id;
+          setLastId(last.id);
+          if (afterWrites) st.lastFresh = true;
+        }
+      });
     };
     // Back from the player its last writes may still be on the way: show the list now,
     // and load it again once they are done, so ✓ marks and 이어보기 are current.
-    if (writing()) load();
+    if (writing()) load(false);
     const reload = settled()
-      .then(() => st.alive && load())
+      .then(() => st.alive && load(true))
       .then(() => {
         if (st.refreshing === reload) st.refreshing = null;
       });

@@ -1,7 +1,7 @@
 // Class101 GraphQL gateway. Documents mirror the ones class101.net sends (minus its
 // client-only @merge/@relayPagination directives), so the gateway accepts them.
 import { endpoint } from './config.js';
-import { idToken, currentUser, AuthError } from './auth.js';
+import { idToken, loginId, AuthError } from './auth.js';
 import { hasLuna, lunaCall, lunaSubscribe } from './luna.js';
 import { request } from './net.js';
 
@@ -12,7 +12,7 @@ const onTv = hasLuna() && !localStorage.getItem('c101:endpoints');
 let relayDownUntil = 0; // the Luna bus refused a read (service missing?): GraphQL uses fetch until then
 
 // The signed-in account, to keep queued writes from going out under another one.
-const account = () => (currentUser() || {}).email || '';
+const account = () => loginId();
 
 // Keep the relay service warm while the app is open.
 export function warmUp() {
@@ -57,10 +57,11 @@ export class ApiError extends Error {
   }
 }
 
-// opts.who: the account a queued write belongs to. It is not sent (nor retried with a
-// refreshed token) once another account is signed in.
+// opts.who: the login a queued write belongs to. It is not sent (nor retried with a
+// refreshed token) once another login is current. opts.strict: any GraphQL error fails
+// the call, for answers where a missing field must not read as "none".
 async function gql(operationName, query, variables, opts = {}) {
-  const { who, retried } = opts;
+  const { who, strict, retried } = opts;
   const mine = () => who === undefined || account() === who;
   const changed = () => new ApiError('다른 계정으로 바뀌어 보내지 않았어요.', 'ACCOUNT_CHANGED');
   if (!mine()) throw changed();
@@ -76,11 +77,12 @@ async function gql(operationName, query, variables, opts = {}) {
   if (!json) throw new ApiError(`서버 응답을 읽지 못했어요. (${res.status})`, 'BAD_RESPONSE');
   const errors = json.errors || [];
   const unauth = errors.some((e) => e.extensions && e.extensions.code === 'UNAUTHENTICATED') || res.status === 401;
-  if (unauth && !retried) return gql(operationName, query, variables, { who, retried: true });
+  if (unauth && !retried) return gql(operationName, query, variables, { who, strict, retried: true });
   if (unauth) throw new AuthError('로그인이 만료됐어요. 다시 로그인해 주세요.', 'SESSION_EXPIRED');
+  if (res.status >= 400 && !json.data) throw new ApiError(`서버가 요청을 처리하지 못했어요. (${res.status})`, `HTTP_${res.status}`);
   const data = json.data || {};
   const empty = Object.keys(data).every((k) => data[k] == null);
-  if (errors.length && empty) {
+  if (errors.length && (empty || strict)) {
     const e = errors[0];
     throw new ApiError(e.message || '요청을 처리하지 못했어요.', e.extensions && e.extensions.code);
   }
@@ -123,7 +125,8 @@ export async function classLastLesson(klassId) {
   const data = await gql(
     'TvClassLastLesson',
     `query TvClassLastLesson($classId: ID!) { class(classId: $classId, marked: true) { id lastLesson { id } } }`,
-    { classId: klassId }
+    { classId: klassId },
+    { strict: true } // a failed lastLesson must not read as "no last lesson"
   );
   return (data.class && data.class.lastLesson && data.class.lastLesson.id) || null;
 }
@@ -208,7 +211,7 @@ export function writing() {
 // was opened with; the save is dropped if another one is signed in by then.
 let saving = Promise.resolve();
 const unsent = {}; // "<who> <lessonId>" → newest position not sent yet
-const lastSent = {}; // "<who> <lessonId>" → { value, at }
+let lastSent = null; // { key, value, at } of the save that went out last
 const lessonStep = {}; // "<who> <lessonId>" → its newest queued step
 export function saveProgress(lessonId, progressSeconds, who = account()) {
   const key = `${who} ${lessonId}`;
@@ -217,9 +220,9 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
     const value = unsent[key];
     if (value === undefined) return null; // merged into an earlier step
     delete unsent[key];
-    // Leaving saves twice (Back, then unmount): skip the same position saved just now.
-    const prev = lastSent[key];
-    if (prev && prev.value === value && Date.now() - prev.at < 5000) return null;
+    // Leaving saves twice (Back, then unmount): skip the same position of the same lesson
+    // saved just before, with no other lesson in between.
+    if (lastSent && lastSent.key === key && lastSent.value === value && Date.now() - lastSent.at < 5000) return null;
     return gql(
       'TvSetLessonProgress',
       `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
@@ -229,7 +232,7 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
       { who }
     ).then(
       () => {
-        lastSent[key] = { value, at: Date.now() };
+        lastSent = { key, value, at: Date.now() };
       },
       () => null
     );

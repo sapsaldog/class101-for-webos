@@ -349,6 +349,18 @@ try {
   check('a refresh token from the Mac logs the TV in (no typing)', await good.eval(`document.querySelectorAll('.card').length === 6`));
   check('…and shows the handed-over account', await good.eval(`/google-user@example.com/.test(document.querySelector('.topbar').textContent)`));
   good.close();
+  // A hand-over that meets a network failure (refresh answers 503) keeps the login it
+  // was given and goes to 내 클래스, which tries again; nothing to redo on the computer.
+  await page.eval(`localStorage.removeItem('c101:session')`);
+  mock.fail.refresh = true;
+  const flaky = await handover('ref-1');
+  await flaky.waitFor(`!!document.querySelector('.home')`, 8000, 'home after a flaky hand-over').catch(() => {});
+  check(
+    'a hand-over that hits a network failure keeps the login and opens 내 클래스',
+    await flaky.eval(`!!document.querySelector('.home') && !document.querySelector('.login') && !!(JSON.parse(localStorage.getItem('c101:session') || '{}').refreshToken)`)
+  );
+  mock.fail.refresh = false;
+  flaky.close();
   await page.eval(`localStorage.removeItem('c101:session')`);
   const bad = await handover('revoked-token');
   await bad.waitFor(`!!document.querySelector('.login .error') && /로그인하지 못했어요/.test(document.querySelector('.login .error').textContent)`, 8000, 'hand-over error').catch(() => {});
