@@ -122,7 +122,12 @@ export default function Home({ restoreFocus }) {
       .then(
         () => mineStill() && setLoadingMore(false),
         (err) => {
-          if (!mineStill()) return;
+          if (!now.alive) return;
+          if (loginId() !== who) {
+            // Signed out under us (the refresh token was rejected): go to sign-in.
+            if (!loginId()) nav.fail(err instanceof AuthError ? err : new AuthError('로그인이 필요해요.', 'NO_SESSION'));
+            return;
+          }
           setLoadingMore(false);
           if (!nav.fail(err)) setError(err.message);
         }

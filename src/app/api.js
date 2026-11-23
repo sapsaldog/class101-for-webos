@@ -234,8 +234,9 @@ export function saveProgress(lessonId, progressSeconds, who = account()) {
       { lessonId, progressSeconds: value },
       { who }
     ).then(
-      () => {
-        lastSent = { key, value, at: Date.now() };
+      (data) => {
+        // Only a confirmed save counts (the site checks the answer the same way).
+        if (data.setLessonProgress) lastSent = { key, value, at: Date.now() };
       },
       () => null
     );

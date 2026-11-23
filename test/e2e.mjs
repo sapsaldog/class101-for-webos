@@ -197,6 +197,7 @@ try {
   check('CH▼ goes to the previous lecture', true);
   await until(() => calls.timeline.some((e) => e.op === 'TvSetLessonProgress' && e.lessonId === 'l2' && e.at >= holdAt), 15000);
   mock.hold.TvSetLessonProgress = 0;
+  await until(() => calls.timeline.filter((e) => e.op === 'TvSetLessonProgress').every((e) => e.doneAt), 10000); // let the held ones finish
   const savesSince = calls.timeline.filter((e) => e.op === 'TvSetLessonProgress' && e.at >= holdAt).map((e) => e.lessonId);
   check(
     'a slow save of the lecture left behind still lands before the next lecture\'s',
@@ -216,8 +217,20 @@ try {
   await page.eval(`document.querySelector('[data-fk="lec-l3"]').click()`);
   await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'l3 from the list');
   await sleep(1500);
+  // The server turns down the first exit save (setLessonProgress: false). The second
+  // save on leaving (unmount) carries the same position and must still go out.
+  mock.fail.saveFalseFor = 'l3';
+  const savesBefore = calls.progress.length;
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.lec').length === 4`, 8000, 'back to class again');
+  await until(() => calls.progress.slice(savesBefore).filter(([id]) => id === 'l3').length >= 2, 3000);
+  mock.fail.saveFalseFor = null;
+  const exitPair = calls.progress.slice(savesBefore).filter(([id]) => id === 'l3');
+  check(
+    'a save the server turns down isn\'t counted: the same position is sent again',
+    exitPair.length >= 2 && exitPair[0][1] === exitPair[1][1],
+    exitPair
+  );
   await page.waitFor(`!!document.querySelector('.lec.current[data-fk="lec-l3"]')`, 5000, 'class screen follows').catch(() => {});
   check(
     'the class screen\'s 이어보기 follows the lesson saved last (asked again after the player)',
@@ -339,6 +352,21 @@ try {
     'a revoked login at startup goes to the sign-in screen with the reason',
     await page.eval(`!!document.querySelector('.login') && /만료/.test((document.querySelector('.login .error') || {}).textContent || '') && !localStorage.getItem('c101:session')`)
   );
+
+  // The login is revoked while 더 보기 loads page two: the app goes to sign-in instead
+  // of leaving the button on "불러오는 중…".
+  mock.state.morePages = true;
+  await page.eval(`(() => { window.__beforeReload = true; localStorage.setItem('c101:session', JSON.stringify({ sid: 'y', email: 'tv@example.com', idToken: 'tok-1', refreshToken: 'ref-1', expiresAt: Date.now() + 3600000 })); location.reload(); })()`).catch(() => {});
+  await page.waitFor(`!window.__beforeReload && !!document.querySelector('[data-fk="more"]')`, 8000, '더 보기 shown').catch(() => {});
+  mock.fail.expireOnPage2 = true;
+  await page.eval(`document.querySelector('[data-fk="more"]').click()`);
+  await page.waitFor(`!!document.querySelector('.login')`, 8000, 'sign-in after 더 보기').catch(() => {});
+  check(
+    'a login revoked during 더 보기 goes to the sign-in screen with the reason',
+    await page.eval(`!!document.querySelector('.login') && /만료/.test((document.querySelector('.login .error') || {}).textContent || '')`)
+  );
+  mock.fail.expireOnPage2 = false;
+  mock.state.morePages = false;
 
   // Login handed over from the Mac (Google accounts): refresh token in launch params.
   const handover = async (token) => {

@@ -19,8 +19,13 @@ export async function startMock({ videoFor, data, serveOpts } = {}) {
 const calls = { signIn: 0, refresh: 0, progress: [], complete: [], ops: [], views: [], enter: [], sessions: [], playtime: [], timeline: [] };
 // hold[operationName] = ms delays that operation's answer (to test waiting for writes).
 // fail.refresh = true makes token refresh answer 503 (a failure that isn't expiry).
+// fail.saveFalseFor = lessonId: that lesson's next position save answers false (once).
+// fail.expireOnPage2 = true: page two of the class list answers UNAUTHENTICATED, and
+// token refresh answers INVALID_REFRESH_TOKEN (the login was revoked meanwhile).
+// state.morePages = true: the class list has a second page.
 const hold = {};
-const fail = { refresh: false };
+const fail = { refresh: false, saveFalseFor: null, expireOnPage2: false };
+const state = { morePages: false };
 let base = '';
 
 const LECTURES = [
@@ -64,8 +69,15 @@ function graphql(body, auth) {
   const custom = data && data.graphql(body, base);
   if (custom) return custom;
   switch (body.operationName) {
-    case 'TvTakingClasses':
-      return { data: { viewer: { takingClasses: { edges: classes().map((node) => ({ node })), pageInfo: { hasNextPage: false, endCursor: null } } } } };
+    case 'TvTakingClasses': {
+      if (v.after === 'page2') {
+        if (fail.expireOnPage2) return { errors: [{ message: 'You need to authenticate first.', extensions: { code: 'UNAUTHENTICATED' } }], data: null };
+        const extra = { ...classes()[5], id: 'k7', title: '테스트 클래스 7' };
+        return { data: { viewer: { takingClasses: { edges: [{ node: extra }], pageInfo: { hasNextPage: false, endCursor: null } } } } };
+      }
+      const pageInfo = state.morePages ? { hasNextPage: true, endCursor: 'page2' } : { hasNextPage: false, endCursor: null };
+      return { data: { viewer: { takingClasses: { edges: classes().map((node) => ({ node })), pageInfo } } } };
+    }
     case 'TvLastClass':
       return { data: { lastClass: { id: 'k1', title: '테스트 클래스 1', coverImageURL: `${base}/cover.png`, progressRatio: k1Progress(), lastLesson: { id: k1.lastLecture }, creator: { nickName: '크리에이터 1' } } } };
     case 'TvCurriculum':
@@ -122,6 +134,10 @@ function graphql(body, auth) {
     }
     case 'TvSetLessonProgress':
       calls.progress.push([v.lessonId, v.progressSeconds]);
+      if (fail.saveFalseFor === v.lessonId) {
+        fail.saveFalseFor = null;
+        return { data: { setLessonProgress: false } }; // not applied
+      }
       if (LECTURES.some((l) => l._id === v.lessonId)) k1.lastLecture = v.lessonId;
       return { data: { setLessonProgress: true } };
     case 'TvClassLastLesson':
@@ -192,6 +208,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/token') {
     calls.refresh++;
     if (fail.refresh) return json(503, { error: { message: 'UNAVAILABLE' } });
+    if (fail.expireOnPage2) return json(400, { error: { message: 'INVALID_REFRESH_TOKEN' } });
     const body = await readJson(req);
     if (/refresh_token=ref-1/.test(body)) return json(200, { id_token: `tok-r${calls.refresh}`, refresh_token: 'ref-1', expires_in: '3600' });
     return json(400, { error: { message: 'INVALID_REFRESH_TOKEN' } });
@@ -244,5 +261,5 @@ const server = http.createServer(async (req, res) => {
 
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  return { base, calls, hold, fail, close: () => server.close() };
+  return { base, calls, hold, fail, state, close: () => server.close() };
 }
