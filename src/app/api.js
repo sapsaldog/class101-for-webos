@@ -140,21 +140,141 @@ export async function lesson(lessonId) {
   return data.lesson;
 }
 
+// ---- watching: what class101.net's lecture page reports ----
+
+// Writes still in flight. Screens that show progress wait for them, or they could
+// read the server before it has the lecture that was just watched.
+const pending = [];
+function write(promise) {
+  pending.push(promise);
+  const done = () => {
+    const i = pending.indexOf(promise);
+    if (i !== -1) pending.splice(i, 1);
+  };
+  promise.then(done, done);
+  return promise;
+}
+
+export function settled(maxMs = 4000) {
+  if (!pending.length) return Promise.resolve();
+  const all = Promise.all(pending.map((p) => p.catch(() => {})));
+  return Promise.race([all, new Promise((r) => setTimeout(r, maxMs))]);
+}
+
 export function saveProgress(lessonId, progressSeconds) {
-  return gql(
-    'TvSetLessonProgress',
-    `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
-      setLessonProgress(lessonID: $lessonId, progressSeconds: $progressSeconds)
-    }`,
-    { lessonId, progressSeconds: Math.max(0, Math.round(progressSeconds)) }
+  return write(
+    gql(
+      'TvSetLessonProgress',
+      `mutation TvSetLessonProgress($lessonId: String!, $progressSeconds: Float!) {
+        setLessonProgress(lessonID: $lessonId, progressSeconds: $progressSeconds)
+      }`,
+      { lessonId, progressSeconds: Math.max(0, Math.round(progressSeconds)) }
+    )
   );
 }
 
 export function completeLecture(lectureId) {
-  return gql(
-    'TvCompleteLecture',
-    `mutation TvCompleteLecture($lectureId: String!) { completeLecture: completeLectureV3(lectureId: $lectureId) { _id completed } }`,
-    { lectureId }
+  return write(
+    gql(
+      'TvCompleteLecture',
+      `mutation TvCompleteLecture($lectureId: String!) { completeLecture: completeLectureV3(lectureId: $lectureId) { _id completed } }`,
+      { lectureId }
+    )
+  );
+}
+
+// Opening a lecture: the site sends both when its lecture page opens (the user's view
+// history, and the class ticket's last-watched time).
+export function viewLecture(klassId, lectureId) {
+  return write(
+    gql(
+      'TvViewHistory',
+      `mutation TvViewHistory($klassId: String!, $lectureId: String!) { updateUserViewHistory(klassId: $klassId, missionId: $lectureId) }`,
+      { klassId, lectureId }
+    )
+  );
+}
+
+export function enterLecture(klassId, lectureId) {
+  return write(
+    gql(
+      'TvKlassTicket',
+      `query TvKlassTicket($klassId: String!) { klassTicket: getKlassTicketByKlassId(klassId: $klassId) { _id } }`,
+      { klassId }
+    ).then((data) => {
+      const ticket = data.klassTicket && data.klassTicket._id;
+      if (!ticket) return null; // the site skips it too
+      return gql(
+        'TvEnterLecture',
+        `mutation TvEnterLecture($klassTicketId: String!, $missionId: String) { enterLecture(klassTicketId: $klassTicketId, missionId: $missionId) { lastWatchedAt } }`,
+        { klassTicketId: ticket, missionId: lectureId }
+      );
+    })
+  );
+}
+
+// Lecture view session: the site sends this 10 s after the page opens and 10 s after
+// each play/pause, passing back the session id it got the last time. Without one,
+// leave sessionId out: an explicit null fails on the gateway ("Cannot return null for
+// non-nullable field Mutation.updateLectureViewHistory").
+export function lectureViewHistory(sessionId, klassId, lectureId, videoPlayed) {
+  const variables = { klassId, lectureId, videoPlayed: !!videoPlayed };
+  if (sessionId) variables.sessionId = sessionId;
+  return write(
+    gql(
+      'TvLectureViewHistory',
+      `mutation TvLectureViewHistory($sessionId: String, $klassId: String!, $lectureId: String!, $videoPlayed: Boolean!) {
+        sessionId: updateLectureViewHistory(sessionId: $sessionId, klassId: $klassId, lectureId: $lectureId, videoPlayed: $videoPlayed)
+      }`,
+      variables
+    ).then((data) => data.sessionId || sessionId || null)
+  );
+}
+
+function requestId() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.prototype.map.call(b, (x) => (x + 0x100).toString(16).slice(1)).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// Class101's REST API. On the TV this goes through the service as well: the API's
+// CORS filter rejects the "Origin: null" of a file:// app ("Invalid CORS request").
+async function rest(path, payload, token) {
+  const body = JSON.stringify(payload);
+  const id = requestId();
+  if (serviceOk) {
+    try {
+      const res = await lunaCall(`${SERVICE}/rest`, { path, body, token, requestId: id, userAgent: navigator.userAgent });
+      return res.status;
+    } catch (e) {
+      /* plain fetch below */
+    }
+  }
+  const res = await fetch(endpoint('api') + path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'x-request-id': id },
+    body,
+  });
+  return res.status;
+}
+
+// Watch time. The site posts it for every 10 s of lecture played (counted on the
+// lecture's own clock, so every 5 s at 2x). It never calls completeLectureV3 for video
+// lectures: Class101 finishes those on its side, and the site polls for it.
+export function reportPlaytime(lessonId, videoId, playbackLocation, interval) {
+  const path = `/v1/playtime-tracking/lessons/${encodeURIComponent(lessonId)}/play`;
+  const payload = { playbackLocation, interval, timestamp: new Date().toISOString(), videoId };
+  return write(
+    idToken()
+      .then((token) => rest(path, payload, token))
+      .then((status) => (status === 401 ? idToken({ force: true }).then((token) => rest(path, payload, token)) : status))
+      .then((status) => {
+        if (status >= 400) throw new ApiError(`시청 시간을 보내지 못했어요. (${status})`, 'PLAYTIME');
+        return status;
+      })
   );
 }
 

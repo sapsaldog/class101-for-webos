@@ -3,7 +3,18 @@ import { SpeedAudio } from '../speedAudio.js';
 import { SpeedVideo } from '../speedVideo.js';
 import { parseCues, cueAt } from '../captions.js';
 import { Nav, useKeys } from '../App.jsx';
-import { lecture as fetchLecture, lesson as fetchLesson, curriculum, flattenLectures, saveProgress, completeLecture } from '../api.js';
+import {
+  lecture as fetchLecture,
+  lesson as fetchLesson,
+  curriculum,
+  flattenLectures,
+  saveProgress,
+  completeLecture,
+  viewLecture,
+  enterLecture,
+  lectureViewHistory,
+  reportPlaytime,
+} from '../api.js';
 import { KEY, arrowOf, colorOf, digitOf, isBack } from '../keys.js';
 import {
   toast,
@@ -24,6 +35,8 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const SETTINGS = 'c101:player';
 const SAVE_EVERY_MS = 15000;
 const NEXT_UP_SECONDS = 8;
+const PLAYTIME_EVERY = 10; // seconds of lecture per watch-time report, as on class101.net
+const VIEW_SESSION_DELAY = 10; // seconds after opening / play / pause
 
 function loadSettings() {
   try {
@@ -292,6 +305,73 @@ export default function Player({ klassId, lectureId, lectures }) {
       v.removeEventListener('ended', onEnded);
       v.removeEventListener('error', onError);
       document.removeEventListener('visibilitychange', onHidden);
+    };
+  }, [info]);
+
+  // ---- what class101.net's lecture page reports besides the position ----
+  // The app used to send only the position, and 내 클래스 progress didn't move after
+  // watching on the TV. The site finishes video lectures on Class101's side.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !info) return;
+    const klass = (info.lecture.klass && info.lecture.klass._id) || klassId;
+    if (!klass) return;
+    let alive = true;
+    viewLecture(klass, lectureId).catch(() => {});
+    enterLecture(klass, lectureId).catch(() => {});
+
+    // View session: sent VIEW_SESSION_DELAY s after opening and after each play or
+    // pause, with the id from the last answer; on errors the wait doubles.
+    let session = null;
+    let wait = VIEW_SESSION_DELAY;
+    let timer = 0;
+    const beat = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        lectureViewHistory(session, klass, lectureId, !v.paused).then(
+          (id) => {
+            session = id;
+            wait = VIEW_SESSION_DELAY;
+          },
+          () => {
+            if (!alive) return;
+            wait = Math.min(wait * 2, 600);
+            beat();
+          }
+        );
+      }, wait * 1000);
+    };
+    beat();
+    v.addEventListener('play', beat);
+    v.addEventListener('pause', beat);
+
+    // Watch time on the lecture's clock (content seconds), like the site: steps over
+    // 3 s are seeks and don't count; a remainder under PLAYTIME_EVERY is dropped.
+    const videoId = info.lesson && info.lesson.video && info.lesson.video.id;
+    let last = null;
+    let played = 0;
+    const tick =
+      videoId &&
+      setInterval(() => {
+        const t = s.time();
+        if (v.paused || v.seeking || v.ended || !isFinite(t)) {
+          last = null;
+          return;
+        }
+        if (last !== null && t >= last && t - last <= 3) played += t - last;
+        last = t;
+        if (played >= PLAYTIME_EVERY) {
+          played %= PLAYTIME_EVERY;
+          reportPlaytime(lectureId, videoId, t, PLAYTIME_EVERY).catch(() => {});
+        }
+      }, 500);
+
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+      clearInterval(tick);
+      v.removeEventListener('play', beat);
+      v.removeEventListener('pause', beat);
     };
   }, [info]);
 

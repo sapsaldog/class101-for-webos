@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { myClasses, lastClass } from '../api.js';
+import { myClasses, lastClass, settled } from '../api.js';
 import { currentUser, signOut } from '../auth.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { toggleHelp } from '../overlay.js';
@@ -27,7 +27,9 @@ export default function Home({ restoreFocus }) {
 
   useEffect(() => {
     let alive = true;
-    Promise.all([lastClass().catch(() => null), myClasses()])
+    // Back from the player its last saves may still be on the way.
+    settled()
+      .then(() => Promise.all([lastClass().catch(() => null), myClasses()]))
       .then(([last, list]) => {
         if (!alive) return;
         cache = { last, items: list.items, pageInfo: list.pageInfo };

@@ -36,6 +36,11 @@ function check(name, ok, detail) {
   console.log(`${ok ? '  ✓' : '  ✗'} ${name}${!ok && detail !== undefined ? `  → ${JSON.stringify(detail)}` : ''}`);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms) {
+  const end = Date.now() + ms;
+  while (!fn() && Date.now() < end) await sleep(100);
+  return fn();
+}
 
 // ---------------------------------------------------------------- mock Class101
 
@@ -68,7 +73,7 @@ const videoState = `(() => { const v = document.querySelector('video'); return v
 try {
   // Point the app at the mock and start clean.
   await page.goto(`${base}/index.html`);
-  await page.eval(`localStorage.clear(); localStorage.setItem('c101:endpoints', ${JSON.stringify(JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql` }))}); location.reload();`).catch(() => {});
+  await page.eval(`localStorage.clear(); localStorage.setItem('c101:endpoints', ${JSON.stringify(JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql`, api: `${base}/api` }))}); location.reload();`).catch(() => {});
   await page.waitFor(`!!document.querySelector('.login input[type=email]')`, 8000, 'login screen');
   await page.waitFor(`document.activeElement && document.activeElement.getAttribute('data-fk') === 'email'`, 3000, 'email focus').catch(() => {});
   check('starts on the login screen with the email field focused', (await active()) === 'email', await active());
@@ -118,6 +123,20 @@ try {
   await page.waitFor(`(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 25; })()`, 10000, 'resume playback');
   let vs = await page.eval(videoState);
   check('player resumes at the saved position (30 s)', vs.t >= 29 && vs.t < 40, vs);
+
+  // What class101.net's lecture page reports, so Class101 moves 이어보기 and progress.
+  await until(() => calls.views.length && calls.enter.length, 3000);
+  check('opening a lecture records the view (updateUserViewHistory)', calls.views.some(([k, l]) => k === 'k1' && l === 'l2'), calls.views);
+  check('…and enters it with the class ticket (enterLecture)', calls.enter.some(([t, l]) => t === 'ticket-k1' && l === 'l2'), calls.enter);
+  await until(() => calls.playtime.length && calls.sessions.length, 15000);
+  const pt = calls.playtime[0] || { body: {} };
+  check(
+    '10 s of playback reports watch time for the lesson',
+    pt.lessonId === 'l2' && pt.body.videoId === 'v-l2' && pt.body.interval === 10 && pt.body.playbackLocation >= 39,
+    pt
+  );
+  check('…with the login token, a timestamp and a request id', /^Bearer tok-/.test(pt.auth || '') && !isNaN(Date.parse(pt.body.timestamp)) && /^[0-9a-f-]{36}$/.test(pt.requestId || ''), pt);
+  check('the view session opens 10 s after playback starts (no sessionId yet)', calls.sessions.length === 1 && calls.sessions[0][0] === '(none)' && calls.sessions[0][1] === 'l2' && calls.sessions[0][2] === true, calls.sessions);
 
   await sleep(600);
   await shot('04-player');
@@ -173,6 +192,26 @@ try {
   await press(KEY.BACK);
   await page.waitFor(`document.querySelectorAll('.card').length === 6`, 8000, 'back home');
   check('Back again returns to 내 클래스 with the class card focused', (await active()) === 'class-k1', await active());
+  await page.waitFor(`document.querySelector('[data-fk="class-k1"] .progress i').style.width === '50%'`, 5000, 'k1 progress').catch(() => {});
+  check(
+    '내 클래스 shows the progress made (2 of 4 lectures done)',
+    (await page.eval(`document.querySelector('[data-fk="class-k1"] .progress i').style.width`)) === '50%',
+    await page.eval(`document.querySelector('[data-fk="class-k1"] .progress i').style.width`)
+  );
+
+  // 이어보기 → next lecture → straight back: 내 클래스 shows it as the class's latest.
+  await press(KEY.UP, 'ArrowUp');
+  await press(KEY.ENTER, 'Enter');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && !v.paused && v.currentTime > 25; })()`, 10000, 'hero playback');
+  await press(KEY.CH_UP, 'PageUp');
+  await page.waitFor(`(() => { const v = document.querySelector('video'); return v && /lecture2/.test(v.currentSrc) && !v.paused; })()`, 10000, 'next lecture from hero');
+  await press(KEY.BACK);
+  await page.waitFor(`document.querySelectorAll('.card').length === 6 && /실전 연습/.test(document.querySelector('[data-fk="class-k1"] .card__meta').textContent)`, 8000, 'latest lecture on home').catch(() => {});
+  check('Back from the player shows the lecture just opened on the class card', /실전 연습/.test(await page.eval(`document.querySelector('[data-fk="class-k1"] .card__meta').textContent`)));
+  const lastSave = calls.ops.lastIndexOf('TvSetLessonProgress');
+  check('내 클래스 reloads only after the player\'s last save', lastSave !== -1 && calls.ops.lastIndexOf('TvTakingClasses') > lastSave, calls.ops.slice(-6));
+  check('…with the hero focused again', (await active()) === 'hero', await active());
+  await press(KEY.DOWN, 'ArrowDown');
 
   // Finding a class: ▲▲ to the top bar's 클래스 찾기, search, open a result, come back.
   await press(KEY.UP, 'ArrowUp');

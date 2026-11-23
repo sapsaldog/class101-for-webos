@@ -7,6 +7,8 @@ const DEFAULT_ENDPOINTS = {
   refresh: 'https://securetoken.googleapis.com/v1/token',
   lookup: 'https://identitytoolkit.googleapis.com/v1/accounts:lookup',
   graphql: 'https://cdn-production-gateway.class101.net/graphql',
+  // Class101's REST API (watch time); the site's playtimeTrackingServiceUrl.
+  api: 'https://api.class101.net/api',
 };
 
 // Tests point the app at a mock server with localStorage["c101:endpoints"].

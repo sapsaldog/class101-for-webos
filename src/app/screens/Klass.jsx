@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState } from 'preact/hooks';
 import { Nav } from '../App.jsx';
-import { curriculum, flattenLectures } from '../api.js';
+import { curriculum, flattenLectures, settled } from '../api.js';
 import { focusKey, focusFirst } from '../focus.js';
 import { duration } from '../format.js';
 
@@ -11,7 +11,8 @@ export default function Klass({ klassId, title, cover, lastLessonId, restoreFocu
 
   useEffect(() => {
     let alive = true;
-    curriculum(klassId)
+    settled()
+      .then(() => curriculum(klassId))
       .then((k) => alive && setKlass(k))
       .catch((err) => {
         if (alive && !nav.fail(err)) setError(err.message);

@@ -48,7 +48,7 @@ try {
   }
   mock = await startMock({ data: showcase, serveOpts: { videoFile: video } });
   const { base } = mock;
-  const endpoints = JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql` });
+  const endpoints = JSON.stringify({ signIn: `${base}/signin`, refresh: `${base}/token`, graphql: `${base}/graphql`, api: `${base}/api` });
 
   await page.goto(`${base}/index.html`);
   await page.eval(`(() => { localStorage.clear(); localStorage.setItem('c101:endpoints', ${JSON.stringify(endpoints)}); location.reload(); })()`).catch(() => {});
